@@ -16,6 +16,9 @@ private let qaOldShadow = ProcessInfo.processInfo.environment["MICA_QA_SHADOW"] 
 private let qaOldShadow = false
 #endif
 private let serviceURL = "http://127.0.0.1:\(servicePort)"
+// つなぎ先を変える操作は、このアプリが起こしたサービスだけが受ける（service/shodan_live.py の APP_TOKEN）
+private let serviceToken = UUID().uuidString
+private let serviceDown = "中のサービスが起きません。Mica を終了して、開き直してください。"
 
 struct Segment: Decodable, Identifiable {
     let id: String
@@ -90,6 +93,17 @@ struct Install: Decodable { var status: String?; var message: String? }
 // つないである機能。advice＝設定 ai.advice（会議中の助言と質問）、analysis＝設定 ai.analysis（会議後の分析）
 struct Capabilities: Decodable { var advice: Bool?; var analysis: Bool? }
 struct APIError: Decodable { let error: String }
+// 「AI をつなぐ」の画面が読む物（service/mica_connect.py の overview と同じ形）
+struct AIStage: Decodable, Identifiable { var role: String; var title: String; var spec: String?; var text: String; var usable: Bool; var id: String { role } }
+struct AICheck: Decodable { var spec: String; var usable: Bool }
+struct AIProvider: Decodable, Identifiable {
+    var name: String; var title: String; var local: Bool; var needs_key: Bool; var has_key: Bool
+    var default_model: String; var analysis_only: Bool; var allowed: Bool; var note: String
+    var id: String { name }
+}
+struct AIOverview: Decodable { var stages: [AIStage]; var check: AICheck?; var outside: [String]; var no_cloud: Bool; var providers: [AIProvider] }
+struct AIModels: Decodable { var models: [String] }
+struct AIDone: Decodable { var message: String; var overview: AIOverview }
 
 @MainActor final class MeetingModel: ObservableObject {
     @Published var meeting = Meeting()
@@ -121,12 +135,16 @@ struct APIError: Decodable { let error: String }
     @Published var connected = false
     @Published var showSources = false
     @Published var showSettings = false
+    @Published var showAI = false
     @Published var recordPending: String?
     @Published var confirmStop = false
     private var recordToken = UUID()
     @Published var now = Date()
     private var timer: Task<Void, Never>?
     private var service: Process?
+    private var misses = 0
+    private var startedOnce = false
+    private var restarts = 0
     private var restoring = false
     private var saveTask: Task<Void, Never>?
     private var endsAt: Double?
@@ -149,10 +167,11 @@ struct APIError: Decodable { let error: String }
     init() { timer = Task { await run() } }
     deinit { timer?.cancel(); adviceTask?.cancel() }
 
-    func request<T: Decodable>(_ path: String, body: [String: Any]? = nil) async throws -> T {
+    func request<T: Decodable>(_ path: String, body: [String: Any]? = nil, timeout: TimeInterval? = nil) async throws -> T {
         var req = URLRequest(url: URL(string: serviceURL + path)!)
-        req.timeoutInterval = body == nil ? 5 : 40
+        req.timeoutInterval = timeout ?? (body == nil ? 5 : 40)
         req.setValue(serviceURL, forHTTPHeaderField: "Origin")
+        req.setValue(serviceToken, forHTTPHeaderField: "X-Mica-Token")
         if let body {
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -168,9 +187,20 @@ struct APIError: Decodable { let error: String }
     private func startService() {
         #if !QA
         guard service == nil, let resources = Bundle.main.resourceURL else { return }
+        let script = resources.appendingPathComponent("mica_service.py").path
+        if !startedOnce {
+            // 前の起動が残したサービスは合言葉が違い、つなぎ先を変えられない。自分のアプリの物だけを止めて、起こし直す
+            startedOnce = true
+            let stale = Process()
+            stale.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+            stale.arguments = ["-f", script]
+            stale.standardOutput = FileHandle.nullDevice; stale.standardError = FileHandle.nullDevice
+            if (try? stale.run()) != nil { stale.waitUntilExit(); if stale.terminationStatus == 0 { Thread.sleep(forTimeInterval: 0.5) } }
+        }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        process.arguments = [resources.appendingPathComponent("mica_service.py").path]
+        process.arguments = [script]
+        process.environment = ProcessInfo.processInfo.environment.merging(["MICA_APP_TOKEN": serviceToken]) { _, new in new }
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         do { try process.run(); service = process }
@@ -210,8 +240,7 @@ struct APIError: Decodable { let error: String }
         }
     }
     private func run() async {
-        do { let _: Meeting = try await request("/api/state") }
-        catch { startService(); try? await Task.sleep(for: .seconds(1)) }
+        startService(); try? await Task.sleep(for: .seconds(1))
         var tick = 0
         while !Task.isCancelled {
             now = Date()
@@ -235,6 +264,8 @@ struct APIError: Decodable { let error: String }
                     restore(brief)
                 }
                 meeting = next; connected = true
+                misses = 0; restarts = 0
+                if self.error == serviceDown { self.error = nil }
                 if (recordPending == "start" && next.recording != nil) || (recordPending == "stop" && next.recording == nil) {
                     recordPending = nil
                 }
@@ -249,6 +280,14 @@ struct APIError: Decodable { let error: String }
                 }
             } catch {
                 connected = false
+                // 中のサービスが落ちたら起こし直す（つながらないのが3回続き、自分の起こした物が動いていない時）。3回起こしても戻らなければ知らせる
+                if error is URLError {
+                    misses += 1
+                    if misses >= 3, service?.isRunning != true {
+                        misses = 0
+                        if restarts < 3 { restarts += 1; service = nil; startService() } else { self.error = serviceDown }
+                    }
+                }
                 // 会話の無い短い録音は分析側が消す。消えた会議を表示し続けて［録音する］まで押せなくならないよう、いまの会議に戻す
                 if let selected = selectedSession, selected != "__next__", error.localizedDescription.contains("会議フォルダが見つかりません") {
                     chooseSession(nil)
@@ -458,6 +497,7 @@ struct MicaView: View {
         .ignoresSafeArea(.container, edges: .top)
         .preferredColorScheme(.dark)
         .sheet(isPresented: $model.showSources) { SourceSheet(model: model) }
+        .sheet(isPresented: $model.showAI) { AIConnectSheet(model: model) }
     }
 
     var topBar: some View {
@@ -632,8 +672,9 @@ struct MicaView: View {
                     Image(systemName: "waveform").font(.system(size: 28, weight: .light)).foregroundStyle(mint.opacity(0.85))
                     Text(!adviceConnected ? "助言は、AI をつなぐと使えます" : model.isThinking ? "質問への回答を考えています" : model.isAutoThinking ? "自動ヒントを考えています" : model.meeting.segments.isEmpty ? "会話を待っています" : ended ? "この会議について聞く" : "いま、何を確認する？")
                         .font(.system(size: 19, weight: .medium))
-                    Text(!adviceConnected ? "録音と文字起こしは、このまま使えます。\nAI をつなぐ時は、ターミナルで ./mica connect を実行します。" : !model.meeting.segments.isEmpty ? (ended ? "会議は終わっています。記録をもとに、下から質問できます。" : "自動ヒントの作成中も、下から質問できます。") : model.meeting.recording == nil ? "対面の会議は、予定の時刻か右上の［録音する］で始まります。" : "会議が始まると、ここに提案が届きます。")
+                    Text(!adviceConnected ? "録音と文字起こしは、このまま使えます。" : !model.meeting.segments.isEmpty ? (ended ? "会議は終わっています。記録をもとに、下から質問できます。" : "自動ヒントの作成中も、下から質問できます。") : model.meeting.recording == nil ? "対面の会議は、予定の時刻か右上の［録音する］で始まります。" : "会議が始まると、ここに提案が届きます。")
                         .font(.system(size: 12)).foregroundStyle(.white.opacity(0.65))
+                    if !adviceConnected { connectButton }
                     if model.isThinking || model.isAutoThinking { ProgressView().controlSize(.small) }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -656,6 +697,13 @@ struct MicaView: View {
                 }
             }
         }
+    }
+
+    var connectButton: some View {
+        Button { model.showAI = true } label: {
+            Text("AI をつなぐ").font(.system(size: 12, weight: .medium)).padding(.horizontal, 16).padding(.vertical, 8)
+                .background(Color.white.opacity(0.94), in: Capsule()).foregroundStyle(Color.black.opacity(0.88)).contentShape(Capsule())
+        }.buttonStyle(.plain)
     }
 
     var transcript: some View {
@@ -693,8 +741,9 @@ struct MicaView: View {
                 if let text = model.meeting.analysis?.text, !text.isEmpty { ReportText(text: text) }
                 else {
                     Label("会議後のまとめ", systemImage: "checkmark.bubble").font(.system(size: 15, weight: .medium))
-                    Text(model.meeting.analysis?.message ?? (model.meeting.capabilities?.analysis == false ? "会議が終わると、文字起こしを保存します。分析は、AI をつなぐと使えます（ターミナルで ./mica connect）。" : "会議が終わると、文字起こしと相談を引き継いで分析します。"))
+                    Text(model.meeting.analysis?.message ?? (model.meeting.capabilities?.analysis == false ? "会議が終わると、文字起こしを保存します。分析は、AI をつなぐと使えます。" : "会議が終わると、文字起こしと相談を引き継いで分析します。"))
                         .font(.system(size: 13)).foregroundStyle(.white.opacity(0.72)).lineSpacing(5)
+                    if model.meeting.capabilities?.analysis == false { connectButton }
                     if let memory = model.meeting.memory, let summary = memory.summary, !summary.isEmpty {
                         Divider()
                         Text("ここまでの整理 · 暫定").font(.system(size: 11)).foregroundStyle(.white.opacity(0.65))
@@ -903,6 +952,220 @@ struct ReportText: View {
         }.textSelection(.enabled)
     }
 }
+struct AIConnectSheet: View {
+    @ObservedObject var model: MeetingModel
+    @State private var overview: AIOverview?
+    @State private var provider = ""  // 名前。"" は未選択、"+" は自分で足すサーバー
+    @State private var customName = ""
+    @State private var baseURL = ""
+    @State private var key = ""
+    @State private var modelName = ""
+    @State private var models: [String] = []
+    @State private var useAdvice = true
+    @State private var useAnalysis = true
+    @State private var busy = false
+    @State private var loadingModels = false
+    @State private var message: String?
+    @State private var failure: String?
+    @State private var modelsNote: String?
+    @State private var keepResult = false  // つないだ直後に選択が名前へ替わる時、結果の文を消さない
+
+    private var chosen: AIProvider? { overview?.providers.first { $0.name == provider } }
+    private var isCustom: Bool { provider == "+" }
+    private var name: String { isCustom ? customName.trimmingCharacters(in: .whitespaces) : provider }
+    private var claude: Bool { chosen?.analysis_only == true }
+    private var needsKey: Bool { chosen?.needs_key == true }
+    private var roles: [String] { claude ? ["analysis"] : (useAdvice ? ["advice"] : []) + (useAnalysis ? ["analysis"] : []) }
+    private var typedModel: String { modelName.trimmingCharacters(in: .whitespaces) }
+    private var canConnect: Bool {
+        guard !busy, !name.isEmpty, !roles.isEmpty else { return false }
+        if isCustom && baseURL.trimmingCharacters(in: .whitespaces).isEmpty { return false }
+        if needsKey && chosen?.has_key != true && key.isEmpty { return false }
+        return claude || !typedModel.isEmpty
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("AI をつなぐ").font(.system(size: 21, weight: .medium)); Spacer()
+                Button("閉じる") { model.showAI = false }.keyboardShortcut(.cancelAction)
+            }
+            Text("録音と文字起こしは、つながなくても Mac の中で動きます。会議の中身を送るのは、ここでつないだ先だけです。")
+                .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if let overview {
+                current(overview)
+                Divider()
+                form(overview)
+            } else if let failure {
+                Text(failure).font(.system(size: 12)).foregroundStyle(.orange).textSelection(.enabled)
+            } else {
+                ProgressView().controlSize(.small)
+            }
+        }
+        .padding(26).frame(width: 480).preferredColorScheme(.dark)
+        .task {
+            do { overview = try await model.request("/api/ai") }
+            catch { failure = "つなぎ先を読めませんでした。" + error.localizedDescription }
+        }
+    }
+
+    private func current(_ overview: AIOverview) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            ForEach(overview.stages) { stage in line(stage.title, stage.text, stage.spec == nil ? nil : stage.role) }
+            if let check = overview.check { line("文字起こしの2重確認", check.spec + (check.usable ? "" : "（使えません）"), "check") }
+            Text("Mac の外へ送る先: " + (overview.outside.isEmpty ? "なし" : overview.outside.joined(separator: "、")))
+                .font(.system(size: 11)).foregroundStyle(.secondary).padding(.top, 2)
+            if overview.no_cloud {
+                Text("MICA_NO_CLOUD=1 が付いているので、この Mac の中の先だけを選べます。").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func line(_ title: String, _ text: String, _ target: String?) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(title).font(.system(size: 12, weight: .medium)).frame(width: 132, alignment: .leading)
+            Text(text).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            Spacer(minLength: 0)
+            if let target {
+                Button("外す") { Task { await disconnect(target) } }.font(.system(size: 11)).disabled(busy)
+                    .accessibilityLabel(title + "を外す")
+            }
+        }
+    }
+
+    private func label(_ text: String) -> some View {
+        Text(text).font(.system(size: 12, weight: .medium)).frame(width: 60, alignment: .leading)
+    }
+    private func hint(_ text: String) -> some View {
+        Text(text).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func form(_ overview: AIOverview) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                label("つなぐ先")
+                Picker("つなぐ先", selection: $provider) {
+                    Text("選んでください").tag("")
+                    ForEach(overview.providers.filter { $0.allowed }) { item in Text(item.title).tag(item.name) }
+                    Divider()
+                    Text("ほかの OpenAI 互換のサーバー").tag("+")
+                }.labelsHidden().fixedSize()
+            }
+            if isCustom {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    label("名前")
+                    VStack(alignment: .leading, spacing: 4) {
+                        TextField("", text: $customName).textFieldStyle(.roundedBorder).accessibilityLabel("サーバーの名前")
+                        hint("自分で付ける呼び名です。英数字と - _ で書きます（例 myserver）。")
+                    }
+                }
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    label("URL")
+                    VStack(alignment: .leading, spacing: 4) {
+                        TextField("", text: $baseURL).textFieldStyle(.roundedBorder).accessibilityLabel("サーバーの URL")
+                        hint("http://…/v1 の形で書きます。")
+                    }
+                }
+            }
+            if needsKey || isCustom {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    label("鍵")
+                    VStack(alignment: .leading, spacing: 4) {
+                        SecureField("", text: $key).textFieldStyle(.roundedBorder).accessibilityLabel("API の鍵")
+                        hint(chosen?.has_key == true ? "鍵は入っています。替える時だけ貼ってください。"
+                             : isCustom ? "要らなければ空のままにします。入れた鍵は Keychain に入ります。"
+                             : "Keychain に入ります。設定ファイルには入りません。")
+                    }
+                }
+            }
+            if !provider.isEmpty {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    label("モデル")
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 8) {
+                            TextField("", text: $modelName).textFieldStyle(.roundedBorder).accessibilityLabel("モデルの名前")
+                            if !claude {
+                                if models.isEmpty {
+                                    Button(loadingModels ? "取得中…" : "一覧を取る") { Task { await loadModels() } }.disabled(loadingModels || name.isEmpty)
+                                } else {
+                                    Menu("一覧から選ぶ") { ForEach(models.prefix(200), id: \.self) { item in Button(item) { modelName = item } } }.fixedSize()
+                                }
+                            }
+                        }
+                        if claude { hint("空のままにすると、Claude Code の既定のモデルを使います。") }
+                        if let modelsNote { Text(modelsNote).font(.system(size: 11)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true).textSelection(.enabled) }
+                    }
+                }
+                if !claude {
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        label("使い道")
+                        VStack(alignment: .leading, spacing: 6) {
+                            Toggle("会議中の助言と質問", isOn: $useAdvice)
+                            Toggle("会議後の分析", isOn: $useAnalysis)
+                        }.toggleStyle(.checkbox).font(.system(size: 12))
+                    }
+                }
+                if let note = chosen?.note { hint(note) }
+                else if isCustom { hint("使う時、会議の文字起こしがこのサーバーへ送られます。") }
+            }
+            HStack(spacing: 10) {
+                Button("試してつなぐ") { Task { await connect() } }.keyboardShortcut(.defaultAction).disabled(!canConnect)
+                if busy { ProgressView().controlSize(.small); Text("つなぎ先を1回試しています…").font(.system(size: 11)).foregroundStyle(.secondary) }
+            }
+            if let message { Text(message).font(.system(size: 12)).foregroundStyle(mint).fixedSize(horizontal: false, vertical: true).textSelection(.enabled) }
+            if let failure { Text(failure).font(.system(size: 12)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true).textSelection(.enabled) }
+        }
+        .onChange(of: provider) { _, _ in
+            key = ""; models = []; modelsNote = nil
+            if keepResult { keepResult = false } else { message = nil; failure = nil }
+            let current = overview.stages.compactMap { $0.spec }.first { $0.hasPrefix(provider + "/") }
+            modelName = current.map { String($0.dropFirst(provider.count + 1)) } ?? chosen?.default_model ?? ""
+            if let chosen, chosen.local { Task { await loadModels() } }  // 外の会社へは、選んだだけでは問い合わせない
+        }
+    }
+
+    private func fields() -> [String: Any] {
+        var value: [String: Any] = ["provider": name]
+        if isCustom { value["base_url"] = baseURL.trimmingCharacters(in: .whitespaces) }
+        if !key.isEmpty { value["key"] = key }
+        return value
+    }
+    private func loadModels() async {
+        guard !name.isEmpty, !claude else { return }
+        let asked = provider
+        loadingModels = true; modelsNote = nil
+        defer { loadingModels = false }
+        do {
+            let got: AIModels = try await model.request("/api/ai/models", body: fields(), timeout: 30)
+            guard asked == provider else { return }
+            models = got.models
+            if typedModel.isEmpty, got.models.count == 1 { modelName = got.models[0] }
+            if got.models.isEmpty { modelsNote = "一覧が空でした。モデルの名前を直接書いてください。" }
+        } catch { if asked == provider { models = []; modelsNote = error.localizedDescription } }
+    }
+    private func connect() async {
+        let connecting = name
+        var value = fields(); value["roles"] = roles
+        if !typedModel.isEmpty { value["model"] = typedModel }
+        busy = true; message = nil; failure = nil
+        defer { busy = false }
+        do {
+            let done: AIDone = try await model.request("/api/ai/connect", body: value, timeout: 180)
+            overview = done.overview; key = ""
+            if isCustom { keepResult = true; provider = connecting }
+            message = done.message
+        } catch { failure = error.localizedDescription }
+    }
+    private func disconnect(_ target: String) async {
+        busy = true; message = nil; failure = nil
+        defer { busy = false }
+        do {
+            let done: AIDone = try await model.request("/api/ai/disconnect", body: ["target": target])
+            overview = done.overview; message = done.message
+        } catch { failure = error.localizedDescription }
+    }
+}
+
 struct SourceSheet: View {
     @ObservedObject var model: MeetingModel
     @State private var search = ""
@@ -968,6 +1231,8 @@ struct SourceSheet: View {
         let mainMenu = NSMenu()
         let appItem = NSMenuItem(); mainMenu.addItem(appItem)
         let appMenu = NSMenu(); appItem.submenu = appMenu
+        let aiItem = NSMenuItem(title: "AI をつなぐ…", action: #selector(showAI), keyEquivalent: ","); aiItem.target = self; appMenu.addItem(aiItem)
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Micaを終了", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let editItem = NSMenuItem(title: "編集", action: nil, keyEquivalent: ""); mainMenu.addItem(editItem)
         let editMenu = NSMenu(title: "編集"); editItem.submenu = editMenu
@@ -982,6 +1247,7 @@ struct SourceSheet: View {
         let menu = NSMenu(); menu.autoenablesItems = false; menu.delegate = self
         recordItem = NSMenuItem(title: "録音を始める", action: #selector(toggleRecording), keyEquivalent: ""); recordItem.target = self; menu.addItem(recordItem)
         let openItem = NSMenuItem(title: "Micaを開く", action: #selector(showWindow), keyEquivalent: ""); openItem.target = self; menu.addItem(openItem)
+        let connectItem = NSMenuItem(title: "AI をつなぐ…", action: #selector(showAI), keyEquivalent: ""); connectItem.target = self; menu.addItem(connectItem)
         menu.addItem(.separator()); menu.addItem(withTitle: "終了", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"); statusItem.menu = menu
         if let session = pendingMeeting { model.chooseSession(session); pendingMeeting = nil }
     }
@@ -993,6 +1259,7 @@ struct SourceSheet: View {
         if window != nil { showWindow() }
     }
     @objc func showWindow() { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+    @objc func showAI() { if !window.isVisible || !NSApp.isActive { showWindow() }; model.showAI = true }
     func menuNeedsUpdate(_ menu: NSMenu) {
         let pending = model.recordPending
         recordItem.title = pending == "start" ? "録音を開始中…" : pending == "stop" ? "録音を停止中…" : model.meeting.recording != nil ? "録音を止める…" : "録音を始める"

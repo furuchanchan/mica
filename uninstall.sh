@@ -19,6 +19,10 @@ for name in watch asr; do
 done
 if [ -d "$APP" ] && [ "$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Contents/Info.plist")" = app.mica.assistant ]; then
   osascript -e 'tell application id "app.mica.assistant" to quit' 2>/dev/null || true
+  # シートを開いたままだと、アプリは終了の依頼を受けない。止まるのを待ち、止まらなければ止める（中のサービスも）
+  for _ in {1..5}; do pgrep -f "$APP/Contents/MacOS/Mica" >/dev/null || break; sleep 1; done
+  pkill -f "$APP/Contents/MacOS/Mica" 2>/dev/null || true
+  pkill -f "$APP/Contents/Resources/mica_service.py" 2>/dev/null || true
   rm -rf "$APP"
 fi
 rm -rf "$SUPPORT/MicaRecorder.app" "$SUPPORT/service"

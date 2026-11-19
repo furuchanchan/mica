@@ -2,6 +2,7 @@
 """Local meeting service. Audio and advice leave the Mac only for the destinations written in the config (ai.*)."""
 from __future__ import annotations
 import argparse
+import hmac
 import json
 import math
 import os
@@ -17,6 +18,7 @@ from urllib.parse import urlparse, parse_qs
 import shodan_session as SESSION
 from shodan_context import store as context_store
 import mica_config
+import mica_connect
 import mica_llm
 from shodan_evidence import POLICY, safe_segment, safe_brief
 from shodan_text import assemble_clauses, effective_segments, without_echo
@@ -488,6 +490,37 @@ def sessions():
     return {'sessions': items}
 
 
+# つなぎ先を変える操作（/api/ai/…）は、Mica.app が自分の起こしたサービスにだけ渡す合言葉を持つ要求に限る。
+# 127.0.0.1 は同じ Mac の別の利用者からも届くので、合言葉が無ければ、会議の中身の送り先を他人が書き換えられる。
+# 見張り役の側のサーバーには合言葉が無く、この操作は使えない。
+APP_TOKEN = os.environ.get('MICA_APP_TOKEN', '')
+
+
+def ai_request(path, request):
+    """画面の「AI をつなぐ」。つなぐ・外す・モデルの一覧を、ターミナルの ./mica と同じ所（mica_connect）で行う。"""
+    def text(name):
+        value = request.get(name)
+        if value is not None and not isinstance(value, str):
+            raise ValueError('入力形式が正しくありません')
+        return (value or '').strip() or None
+    try:
+        if path == '/api/ai/models':
+            return {'models': mica_connect.models(text('provider'), text('base_url'), key=text('key'))}
+        if path == '/api/ai/disconnect':
+            mica_connect.disconnect(text('target'))
+            return {'message': '外しました。鍵は Keychain に残っています。', 'overview': mica_connect.overview()}
+        if path == '/api/ai/connect':
+            roles = request.get('roles')
+            if not isinstance(roles, list) or not all(isinstance(role, str) for role in roles):
+                raise ValueError('入力形式が正しくありません')
+            done = mica_connect.connect(text('provider'), text('model'), roles, text('base_url'), key=text('key'))
+            took = f'返事が来ました（{done["seconds"]:.1f}秒）。' if done['seconds'] is not None else ''
+            return {'message': took + done['message'], 'overview': mica_connect.overview()}
+    except OSError as error:
+        raise ValueError(f'設定ファイルを読み書きできませんでした: {error}') from None
+    raise ValueError('その操作はありません')
+
+
 class Handler(BaseHTTPRequestHandler):
     def authorized(self, write=False):
         if self.headers.get('Sec-Fetch-Site') not in (None, 'none', 'same-origin'):
@@ -524,6 +557,8 @@ class Handler(BaseHTTPRequestHandler):
                 value = read_state(session_id)
             elif url.path == '/api/sessions':
                 value = sessions()
+            elif url.path == '/api/ai':
+                value = mica_connect.overview()
             elif url.path == '/':
                 body = (HERE / 'live.html').read_bytes()
                 self.send_response(200)
@@ -569,6 +604,10 @@ class Handler(BaseHTTPRequestHandler):
                     from shodan_preparation import schedule
                     schedule(folder, force=True)
                 self.reply(context); return
+            if self.path.startswith('/api/ai/'):
+                if not APP_TOKEN or not hmac.compare_digest(self.headers.get('X-Mica-Token', '').encode(), APP_TOKEN.encode()):
+                    self.reply({'error': 'つなぎ先を変える操作は、Mica.app の画面からだけ使えます。Mica を終了して開き直すか、ターミナルの ./mica connect を使ってください。'}, 403); return
+                self.reply(ai_request(self.path, request)); return
             if self.path == '/api/recording':
                 if request.get('action') not in ('start', 'stop'):
                     raise ValueError('録音の操作が不正です')

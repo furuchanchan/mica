@@ -22,7 +22,10 @@ if curl -s -m 5 -H "Origin: $U" "$U/api/state" | /usr/bin/python3 -c "import jso
 fi
 OLD=$(mktemp -d)/Mica-old.app
 if [ -d "$APP" ]; then
-  osascript -e 'tell application id "app.mica.assistant" to quit' 2>/dev/null || true; sleep 2
+  osascript -e 'tell application id "app.mica.assistant" to quit' 2>/dev/null || true
+  # シートを開いたままだと、アプリは終了の依頼を受けない。古い物が動いたままだと新しい物が起きないので、止まるのを待ち、止まらなければ止める
+  for _ in {1..5}; do pgrep -f "$APP/Contents/MacOS/Mica" >/dev/null || break; sleep 1; done
+  pkill -f "$APP/Contents/MacOS/Mica" 2>/dev/null || true
   pkill -f "$APP/Contents/Resources/mica_service.py" 2>/dev/null || true; sleep 1
   mv "$APP" "$OLD"
 fi

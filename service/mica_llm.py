@@ -76,7 +76,7 @@ def connection(spec: str) -> dict:
         found['key'] = mica_config.stored_key(found['key_env'], f'{name}-api-key')
         if not found['key']:
             raise NotConnected(f'{found["label"]} の鍵が見つかりません（環境変数 {found["key_env"]} か、Keychain の {name}-api-key）。'
-                               'ターミナルで ./mica connect を実行してください。')
+                               'Mica の「AI をつなぐ」か、ターミナルの ./mica connect でつないでください。')
     return found
 
 
@@ -84,7 +84,7 @@ def resolve(role: str) -> dict:
     """role（advice / analysis）の今のつなぎ先。"""
     spec = mica_config.ai_spec(role)
     if not spec:
-        raise NotConnected(f'設定 ai.{role} が空です。つなぐには、ターミナルで ./mica connect を実行してください。')
+        raise NotConnected(f'設定 ai.{role} が空です。つなぐには、Mica の「AI をつなぐ」か、ターミナルの ./mica connect を使ってください。')
     return connection(spec)
 
 

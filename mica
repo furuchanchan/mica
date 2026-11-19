@@ -21,39 +21,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / 'service'))
 import mica_config  # noqa: E402
+import mica_connect  # noqa: E402
 import mica_llm  # noqa: E402
 
-ROLES = {'advice': '会議中の助言と質問', 'analysis': '会議後の分析'}
-CHOICES = [
-    ('ollama', 'この Mac の Ollama（鍵なし。Mac の外へ送らない）'),
-    ('lmstudio', 'この Mac の LM Studio（鍵なし。Mac の外へ送らない）'),
-    ('openai', 'OpenAI の API の鍵'),
-    ('anthropic', 'Anthropic（Claude）の API の鍵'),
-    ('gemini', 'Google Gemini の API の鍵'),
-    ('openrouter', 'OpenRouter の API の鍵'),
-    ('groq', 'Groq の API の鍵'),
-    ('claude_cli', 'Claude Code（Claude の契約か API の鍵で動く。会議後の分析だけ）'),
-]
-DEFAULT_MODELS = {'openai': 'gpt-6-luna', 'anthropic': 'claude-opus-5-5'}
-
-
-def raw_config() -> dict:
-    """設定ファイルに書いてある項目だけ（既定を重ねる前）。"""
-    path = mica_config.config_path()
-    raw = json.loads(path.read_text()) if path.exists() else {}
-    mica_config.check(raw, path)
-    return raw
-
-
-def write_config(raw: dict) -> None:
-    path = mica_config.config_path()
-    mica_config.check(raw, path)  # 誤った設定は書かない
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + '.tmp')
-    temporary.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + '\n')
-    os.chmod(temporary, 0o600)  # 鍵は入らないが、つなぎ先の URL が入るので本人だけが読める形にする
-    temporary.replace(path)
-    mica_config.reload()
+from mica_connect import CHOICES, DEFAULT_MODELS, ROLES, key_source, raw_config, role_line, write_config  # noqa: E402,F401
 
 
 def ask(prompt: str, default: str = '') -> str:
@@ -69,66 +40,23 @@ def pad(text: str, width: int) -> str:
     return text + ' ' * max(0, width - used)
 
 
-def key_source(found: dict) -> str:
-    if not found['key_env']:
-        return 'この Mac の中' if mica_llm.is_local(found) else '鍵なし'
-    return f'鍵: 環境変数 {found["key_env"]}' if os.environ.get(found['key_env'], '').strip() else '鍵: Keychain'
-
-
-def role_line(role: str) -> tuple:
-    """(表示する文, 使えるか, Mac の外の送り先か None)。"""
-    spec = mica_config.ai_spec(role)
-    if not spec:
-        return 'つないでいません', False, None
-    if role == 'analysis' and mica_config.analysis_engine() == 'claude_cli':
-        if not mica_config.cloud_allowed():
-            return f'{spec}（MICA_NO_CLOUD=1 のため使いません）', False, None
-        if not shutil.which('claude'):
-            return f'{spec}（claude コマンドが見つかりません。Claude Code を入れてください）', False, None
-        return f'{spec}（Claude Code）', True, 'Anthropic（Claude Code 経由）'
-    try:
-        found = mica_llm.connection(spec)
-    except (mica_llm.NotConnected, ValueError) as error:
-        return f'{spec}（使えません: {error}）', False, None
-    return f'{spec}（{key_source(found)}）', True, None if mica_llm.is_local(found) else found['label']
-
-
 def status(_args) -> int:
-    print(f'Mica のつなぎ先（設定: {mica_config.config_path()}）\n')
+    seen = mica_connect.overview(choices=False)
+    print(f'Mica のつなぎ先（設定: {seen["config_path"]}）\n')
     print('  段1  ' + pad('録音と文字起こし', 22) + 'Mac の中だけで動きます（鍵は要りません）')
-    outside, missing = [], []
-    for number, role in ((2, 'advice'), (3, 'analysis')):
-        line, usable, destination = role_line(role)
-        print(f'  段{number}  ' + pad(ROLES[role], 22) + line)
-        if destination:
-            outside.append(destination)
-        if not usable:
-            missing.append(role)
-    check = mica_config.config()['ai']['transcription_check']
-    if check:
-        try:
-            audio = mica_llm.transcription_connection()
-        except (mica_llm.NotConnected, ValueError):
-            audio = None
-        print('       ' + pad('文字起こしの2重確認', 22) + f'{check}（{"使えます" if audio else "使えません。鍵・設定・MICA_NO_CLOUDを確認してください"}）')
-        if audio and not mica_llm.is_local(audio):
-            outside.append(audio['label'] + '（音声）')
-    value = mica_config.config()
-    integrations = [('calendar', value['calendar']['enabled'], 'Google Calendar'),
-                    ('drive', value['delivery']['drive']['enabled'], 'Google Drive'),
-                    ('slack', value['delivery']['slack']['enabled'], 'Slack'),
-                    ('knowledge_base', value['delivery']['knowledge_base']['enabled'], '知識ベースの外部コマンド')]
-    for name, enabled, destination in integrations:
-        if enabled:
-            active = mica_config.cloud_allowed()
-            print('       ' + pad(destination, 22) + ('有効' if active else 'MICA_NO_CLOUD=1 のため停止'))
-            if active:
-                outside.append(destination)
-    print('\nMac の外へ送る先: ' + ('、'.join(dict.fromkeys(outside)) or 'なし（音声も文字も Mac の外へ出ません）'))
-    if not mica_config.cloud_allowed():
+    for number, stage in enumerate(seen['stages'], 2):
+        print(f'  段{number}  ' + pad(stage['title'], 22) + stage['text'])
+    if seen['check']:
+        print('       ' + pad('文字起こしの2重確認', 22) + f'{seen["check"]["spec"]}（'
+              + ('使えます' if seen['check']['usable'] else '使えません。鍵・設定・MICA_NO_CLOUDを確認してください') + '）')
+    for item in seen['integrations']:
+        print('       ' + pad(item['title'], 22) + ('有効' if item['active'] else 'MICA_NO_CLOUD=1 のため停止'))
+    print('\nMac の外へ送る先: ' + ('、'.join(seen['outside']) or 'なし（音声も文字も Mac の外へ出ません）'))
+    if seen['no_cloud']:
         print('MICA_NO_CLOUD=1 が付いています。この Mac の外の AI へは送りません。')
+    missing = [stage['title'] for stage in seen['stages'] if not stage['usable']]
     if missing:
-        print('次の一歩: ./mica connect（' + '・'.join(ROLES[role] for role in missing) + 'をつなぐ）')
+        print('次の一歩: ./mica connect（' + '・'.join(missing) + 'をつなぐ。Mica の画面では Mica > AI をつなぐ…）')
     return 0
 
 
@@ -174,83 +102,51 @@ def connect(args) -> int:
     name = args.provider
     if not name:
         print('つなぐ先を選んでください。')
-        for index, (key, text) in enumerate(CHOICES, 1):
+        for index, (key, text, _) in enumerate(CHOICES, 1):
             print(f'  {index}) {key.ljust(11)}{text}')
         print('  ほかの OpenAI 互換のサーバーは: ./mica connect 名前 --base-url http://…/v1')
         answer = ask('番号か名前')
         name = CHOICES[int(answer) - 1][0] if answer.isdigit() and 0 < int(answer) <= len(CHOICES) else answer
-    raw = raw_config()
-    ai = raw.setdefault('ai', {})
     if args.key_env and not args.base_url:
         raise SystemExit('--key-env は --base-url と一緒に指定してください。')
-    if args.transcription_check and name != 'openai':
-        raise SystemExit('--transcription-check は openai の時だけ指定できます。')
-    if name == 'claude_cli':
-        if args.advice or args.base_url or args.key_env:
-            raise SystemExit('claude_cli は会議後の分析だけに使えます。')
-        if not mica_config.cloud_allowed():
-            raise SystemExit('MICA_NO_CLOUD=1 のため、Claude Code にはつなぎません。')
-        if not shutil.which('claude'):
-            raise SystemExit('claude コマンドが見つかりません。Claude Code（https://claude.com/claude-code）を入れてログインしてから、もう一度実行してください。')
-        ai['analysis'] = f'claude_cli/{args.model}' if args.model else 'claude_cli'
-        write_config(raw)
-        print(f'会議後の分析を Claude Code につなぎました（{ai["analysis"]}）。分析の時、文字起こしと画面の静止画が Anthropic へ送られます。')
-        return status(args)
-    if args.base_url:
-        entry = {'base_url': args.base_url}
-        if args.key_env:
-            entry['api_key_env'] = args.key_env
-        ai.setdefault('providers', {})[name] = entry
-    mica_config.check(raw, mica_config.config_path())
-    try:
-        found = mica_llm.provider(name, ai.get('providers', {}))
-    except ValueError as error:
-        raise SystemExit(str(error))
-    found.update(name=name, key='')
-    if not mica_llm.is_local(found) and not mica_config.cloud_allowed():
-        raise SystemExit(f'MICA_NO_CLOUD=1 が付いているので、{found["label"]} にはつなぎません。')
-    if found['key_env']:
-        store_key(name, found)
-        found['key'] = mica_config.stored_key(found['key_env'], f'{name}-api-key')
     roles = [role for role in ROLES if getattr(args, role)]
-    check_only = args.transcription_check and not roles
-    model = None if check_only else choose_model(name, found, args.model)
-    if not roles and not check_only:
-        answer = ask('何に使いますか  1) 会議中の助言と質問  2) 会議後の分析  3) 両方', '3')
-        if answer not in ('1', '2', '3'):
-            raise SystemExit('1・2・3 のどれかを指定してください。')
-        roles = {'1': ['advice'], '2': ['analysis'], '3': list(ROLES)}[answer]
-    for role in roles:
-        ai[role] = f'{name}/{model}'
-    if name == 'openai' and (args.transcription_check or (not args.model and sys.stdin.isatty() and ask(
-            '文字起こしの2重確認もオンにしますか（会議中の音声が OpenAI へ送られます） y/N', 'N').lower().startswith('y'))):
-        ai['transcription_check'] = 'openai'
-    mica_config.check(raw, mica_config.config_path())
-    if not args.no_check and roles:
-        print(f'{found["label"]} の {model} を1回試します…')
-        try:
-            seconds = mica_llm.check_connection(dict(found, model=model))
-        except RuntimeError as error:
-            raise SystemExit(f'つなげませんでした。設定は変えていません。\n{error}') from None
-        print(f'返事が来ました（{seconds:.1f}秒）。')
-    write_config(raw)
-    if check_only:
-        print('文字起こしの2重確認をつなぎました。音声の送信試験は行っていません。')
-        return status(args)
-    where = 'この Mac の中で動くので、Mac の外へは送りません。' if mica_llm.is_local(found) else f'使う時、会議の文字起こしが {found["label"]} へ送られます。'
-    print('・'.join(ROLES[role] for role in roles) + f'を {name}/{model} につなぎました。{where}')
-    print('Mica を開いていれば、次の呼び出しから使えます。\n')
+    try:
+        if name == 'claude_cli':
+            done = mica_connect.connect(name, args.model, roles + ['analysis'], args.base_url, args.key_env,
+                                        transcription_check=args.transcription_check)
+            print(done['message'])
+            return status(args)
+        if args.transcription_check and name != 'openai':
+            raise SystemExit('--transcription-check は openai の時だけ指定できます。')
+        found = mica_connect.candidate(raw_config(), name, args.base_url, args.key_env)
+        if found['key_env']:
+            store_key(name, found)
+            found['key'] = mica_config.stored_key(found['key_env'], f'{name}-api-key')
+        check_only = args.transcription_check and not roles
+        model = None if check_only else choose_model(name, found, args.model)
+        if not roles and not check_only:
+            answer = ask('何に使いますか  1) 会議中の助言と質問  2) 会議後の分析  3) 両方', '3')
+            if answer not in ('1', '2', '3'):
+                raise SystemExit('1・2・3 のどれかを指定してください。')
+            roles = {'1': ['advice'], '2': ['analysis'], '3': list(ROLES)}[answer]
+        audio = name == 'openai' and (args.transcription_check or (not args.model and sys.stdin.isatty() and ask(
+            '文字起こしの2重確認もオンにしますか（会議中の音声が OpenAI へ送られます） y/N', 'N').lower().startswith('y')))
+        if not args.no_check and roles:
+            print(f'{found["label"]} の {model} を1回試します…')
+        done = mica_connect.connect(name, model, roles, args.base_url, args.key_env,
+                                    transcription_check=bool(audio), test=not args.no_check)
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
+    if done['seconds'] is not None:
+        print(f'返事が来ました（{done["seconds"]:.1f}秒）。')
+    print(done['message'])
+    if not check_only:
+        print('Mica を開いていれば、次の呼び出しから使えます。\n')
     return status(args)
 
 
 def disconnect(args) -> int:
-    raw = raw_config()
-    ai = raw.setdefault('ai', {})
-    targets = {'advice': ['advice'], 'analysis': ['analysis'], 'check': ['transcription_check'],
-               'all': ['advice', 'analysis', 'transcription_check']}[args.target]
-    for key in targets:
-        ai[key] = None
-    write_config(raw)
+    mica_connect.disconnect(args.target)
     print('外しました。鍵は Keychain に残っています。消す時は security delete-generic-password -s <会社>-api-key を実行してください。\n')
     return status(args)
 

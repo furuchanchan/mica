@@ -551,7 +551,7 @@ def analyze(folder: str, stats: dict, local_only: bool = False) -> str:
     elif mica_config.analysis_engine() == 'claude_cli':
         draft_by_claude(folder, prompt, frame_paths, draft_path)
     else:
-        raise RuntimeError('会議後の AI をつないでいません。./mica connect でつないでください。')
+        raise RuntimeError('会議後の AI をつないでいません。Mica の「AI をつなぐ」か、ターミナルの ./mica connect でつないでください。')
     if analysis_inputs(folder) != inputs:
         raise RuntimeError("分析中に根拠の入力が変わりました。未確定の分析は配信しません。")
     draft = json.loads(draft_path.read_text())
@@ -647,7 +647,7 @@ def process_recording(folder: str, local_only: bool = False, live_result=None, f
         else:
             sends_out = engine == "claude_cli"
         if engine == "none" or (sends_out and not mica_config.cloud_allowed()):
-            message = ("文字起こしを保存しました。分析は、AI をつなぐと使えます（ターミナルで ./mica connect）。" if engine == "none"
+            message = ("文字起こしを保存しました。分析は、AI をつなぐと使えます。" if engine == "none"
                        else "文字起こしを保存しました。MICA_NO_CLOUD=1 のため、分析は Mac の外へ送っていません。")
             analysis_status(folder, "complete", message)
             print(message)

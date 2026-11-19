@@ -56,6 +56,12 @@ python3 tests/selftest.py
 
 ## AI をつなぐ
 
+Mica の画面で［AI をつなぐ］を押します（メニューの Mica > AI をつなぐ… でも開けます）。つなぐ先・鍵・モデル・使い道を選んで［試してつなぐ］を押すと、試しの呼び出しが通った時だけつながります。
+
+![AI をつなぐ画面](docs/connect-ai.png)
+
+ターミナルからも同じ事ができます。
+
 ```bash
 ./mica connect
 ```
@@ -143,7 +149,7 @@ API・この Mac の LLM は、試しの呼び出しが通ってから設定を�
 | `context.*` | オフ | 過去の Claude Code の会話から、会議の背景を探す |
 | `negotiation_notes` | null | 商談の技の台帳（Markdown）。あると、商談の分析で進め方を採点する |
 
-`ai` の4項目は `./mica connect` が書きます。手で書いても構いません。
+`ai` の4項目は、画面の［AI をつなぐ］と `./mica connect` が書きます。手で書いても構いません。
 `delivery.*` と `negotiation_notes` は、`ai.analysis` を書いた時だけ使えます。
 
 ## 録音について
@@ -158,6 +164,7 @@ API・この Mac の LLM は、試しの呼び出しが通ってから設定を�
 - `service/shodan_live.py` 会議中の文字起こしと、画面が読むサーバー
 - `service/shodan_analyze.py` 会議後の文字起こしの保存と分析
 - `service/mica_llm.py` 外の AI と、この Mac の LLM を呼ぶ所（OpenAI の Responses API、Anthropic の Messages API、OpenAI 互換の Chat Completions）
+- `service/mica_connect.py` つなぐ・外す処理。画面の［AI をつなぐ］とターミナルの `mica` が同じここを通る
 - `mica` つなぎ先を見る・つなぐ・確かめる道具
 - `app/` Mica.app（SwiftUI）
 - 常駐のログは `~/Library/Application Support/Mica/logs/` に出ます
