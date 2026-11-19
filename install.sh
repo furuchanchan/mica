@@ -65,3 +65,4 @@ PLIST
 else
   echo "入りました（常駐は登録していません）。"
 fi
+echo "今の状態は ./mica status、AI をつなぐ時は ./mica connect です（つながなくても、録音と文字起こしは動きます）。"

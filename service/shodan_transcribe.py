@@ -25,7 +25,6 @@ import uuid
 import wave
 
 import mica_config
-from shodan_ai import _api_key
 from shodan_evidence import canonical, numeric_keys, vocabulary, mark_verification, disputed, equivalent_text
 from shodan_text import assemble_clauses
 
@@ -103,7 +102,7 @@ def _post(fields, path):
     body, boundary = _multipart(fields, path)
     request = urllib.request.Request(
         'https://api.openai.com/v1/audio/transcriptions', method='POST', data=body,
-        headers={'Authorization': 'Bearer ' + _api_key(),
+        headers={'Authorization': 'Bearer ' + mica_config.transcription_check_key(),
                  'Content-Type': 'multipart/form-data; boundary=' + boundary})
     # One transport attempt here. The live worker owns the durable retry queue;
     # nested retries would hide the outage and hold two workers for minutes.
@@ -416,14 +415,13 @@ def transcribe_verified(path, channel, offset, folder):
     if not ensure_ready(0):
         raise LocalRecognitionPending('音声認識の準備待ちです。未処理の録音は保存しています。')
     duration = _duration(Path(path))
-    from mica_config import openai_key
-    if openai_key():
+    if mica_config.transcription_check_key():
         with ThreadPoolExecutor(max_workers=2) as pool:
             text_future = pool.submit(transcribe_text, path)
             voice_future = pool.submit(_anonymous_segments, path, channel, offset, folder)
             segments, text = voice_future.result(), text_future.result()
     else:
-        # 鍵なし：Mac の中の認識が唯一の候補。比べる相手が無いので、食い違いの印は付かない
+        # 2重確認なし：Mac の中の認識が唯一の候補。比べる相手が無いので、食い違いの印は付かない
         segments = _anonymous_segments(path, channel, offset, folder)
         text = ''.join(s['text'] for s in segments)
         if not text:
@@ -750,9 +748,8 @@ def transcribe_batch(paths, channel, folder):
 def transcribe_draft(paths, channel, folder):
     audio, offset = _batch_audio(paths, folder)
     try:
-        from mica_config import openai_key
-        if _silent(audio) or not openai_key():
-            return []   # 鍵なしでは速報（下書き）を出さず、確定の文字起こしだけを出す
+        if _silent(audio) or not mica_config.transcription_check_key():
+            return []   # 2重確認なしでは速報（下書き）を出さず、確定の文字起こしだけを出す
         text = transcribe_text(audio)
         return ([{'id': Path(paths[0]).stem + '-draft', 'start': offset,
                   'end': offset + _duration(audio), 'who': '自分' if channel == 'self' else '確認中',

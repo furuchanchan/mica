@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local meeting service; authorized audio and advice are sent to OpenAI."""
+"""Local meeting service. Audio and advice leave the Mac only for the destinations written in the config (ai.*)."""
 from __future__ import annotations
 import argparse
 import json
@@ -17,6 +17,7 @@ from urllib.parse import urlparse, parse_qs
 import shodan_session as SESSION
 from shodan_context import store as context_store
 import mica_config
+import mica_llm
 from shodan_evidence import POLICY, safe_segment, safe_brief
 from shodan_text import assemble_clauses, effective_segments, without_echo
 from shodan_display import transcript_turns
@@ -145,7 +146,7 @@ def _transcribe(folder, resume):
 
     save()
     auto_stop, auto_thread = (None, None)
-    if not resume and not (audio / 'capture.done').exists() and mica_config.openai_key():
+    if not resume and not (audio / 'capture.done').exists() and mica_llm.connected('advice'):
         auto_stop, auto_thread = SESSION.start_automatic(folder)
     try:
         if resume:
@@ -408,7 +409,7 @@ def read_state(session_id=None):
     value = _read_state(session_id)
     value['recording'] = active_recording()
     # つないだ分だけ機能が増える。画面はこれを見て、使えない欄に「つなぐと使えます」を出す
-    value['capabilities'] = {'advice': bool(mica_config.openai_key()), 'analysis': mica_config.analysis_engine() != 'none'}
+    value['capabilities'] = {'advice': mica_llm.connected('advice'), 'analysis': mica_config.analysis_engine() != 'none'}
     return value
 
 

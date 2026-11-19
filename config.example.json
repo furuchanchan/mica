@@ -2,6 +2,13 @@
   "data_root": "~/Movies/Mica",
   "user_name": "自分",
   "ignore_mic_apps": ["com.example.dictation"],
-  "analysis": {"engine": "claude_cli", "model": null},
+  "ai": {
+    "advice": "ollama/gemma3:4b",
+    "analysis": "claude_cli",
+    "transcription_check": null,
+    "providers": {
+      "myserver": {"base_url": "http://192.168.1.10:8000/v1", "api_key_env": "MYSERVER_API_KEY"}
+    }
+  },
   "calendar": {"enabled": false, "account": null, "calendars": ["primary"], "personal_calendar": null}
 }

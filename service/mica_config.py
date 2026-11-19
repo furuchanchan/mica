@@ -2,8 +2,8 @@
 
 設定ファイル: ~/.config/mica/config.json（環境変数 MICA_CONFIG で場所を替えられる）。
 書いた項目だけが既定を上書きする。知らない項目・型の違う値は、原因が分かる文で失敗する。
-OpenAI の鍵の探し方：環境変数 OPENAI_API_KEY → Keychain の「openai-api-key」。
-MICA_NO_CLOUD=1 を付けると、鍵があっても外へ音声・文字を送らない。
+外の AI へ送るのは、設定 ai に書いた先だけ。鍵が Mac にあるだけでは何も送らない（つなぎ方は service/mica_llm.py）。
+MICA_NO_CLOUD=1 を付けると、設定に書いてあっても、この Mac の外の AI へは送らない。
 
 入っている Mica と別にもう1つ動かす時（開発・確認）は、次の環境変数で置き場とポートを分ける。
 MICA_APP_SUPPORT（既定 ~/Library/Application Support/Mica）、MICA_LIVE_PORT（既定 18768）、MICA_APP_PORT（既定 18770）。
@@ -26,7 +26,12 @@ DEFAULTS = {
         'knowledge_base': {'enabled': False, 'ingest_command': None, 'search_command': None},  # ingest_command: argv の配列。末尾に分析ページのパスを足す
     },
     'context': {'enabled': False, 'projects_dir': None},   # 過去の会話ログ（Claude Code の projects フォルダ）から会議の背景を探す
-    'analysis': {'engine': 'none', 'model': None},         # engine: claude_cli か none
+    'ai': {
+        'advice': None,                   # 会議中の助言と質問、会議前の準備。「会社/モデル」（例 openai/gpt-6-luna、ollama/qwen3:4b）。None なら使わない
+        'analysis': None,                 # 会議後の分析。「claude_cli」（Claude Code。claude_cli/モデル名 も可）か「会社/モデル」。None なら文字起こしの保存まで
+        'transcription_check': None,      # 「openai」で、会議中の音声を OpenAI でも文字に起こし、Mac の中の認識と比べる。None なら Mac の中だけ
+        'providers': {},                  # 自分で足す OpenAI 互換のサーバー。{"名前": {"base_url": "http://…/v1", "api_key_env": "環境変数の名前"}}
+    },
     'negotiation_notes': None,            # 商談の技の台帳（Markdown。「## 技」以降を使う）。None なら使わない
     'ignore_mic_apps': [],                # マイクを使っても会議と見なさないアプリの bundle id（前方一致）。音声入力アプリなど
 }
@@ -36,8 +41,11 @@ def _merge(base: dict, over: dict, path: str = '') -> dict:
     result = copy.deepcopy(base)
     for key, value in over.items():
         if key not in base:
-            raise ValueError(f'設定ファイルに知らない項目があります: {path}{key}')
-        if isinstance(base[key], dict):
+            moved = '（0.12 で ai.analysis に替わりました。README の「設定」を見てください）' if path + key == 'analysis' else ''
+            raise ValueError(f'設定ファイルに知らない項目があります: {path}{key}{moved}')
+        if path + key == 'ai.providers':  # 名前は使う人が決めるので、中身は mica_llm が確かめる
+            result[key] = value
+        elif isinstance(base[key], dict):
             if not isinstance(value, dict):
                 raise ValueError(f'設定の {path}{key} は {{...}} の形で書いてください')
             result[key] = _merge(base[key], value, f'{path}{key}.')
@@ -50,9 +58,24 @@ def config_path() -> Path:
     return Path(os.environ.get('MICA_CONFIG') or '~/.config/mica/config.json').expanduser()
 
 
-@lru_cache(maxsize=1)
+_loaded = {'stamp': None, 'value': None}
+
+
 def config() -> dict:
+    """設定を返す。設定ファイルが書き換わったら読み直す（./mica connect の後に、常駐を起こし直さなくて済むように）。"""
     path = config_path()
+    try:
+        stamp = (str(path), path.stat().st_mtime_ns)
+    except FileNotFoundError:
+        stamp = (str(path), 0)
+    if _loaded['stamp'] != stamp:
+        value = _read(path)
+        _loaded.update(stamp=stamp, value=value)
+        stored_key.cache_clear()  # 鍵も、つなぎ直した後の物を読む
+    return _loaded['value']
+
+
+def _read(path: Path) -> dict:
     loaded = {}
     if path.exists():
         try:
@@ -61,25 +84,43 @@ def config() -> dict:
             raise ValueError(f'設定ファイル {path} を JSON として読めません: {error}') from None
         if not isinstance(loaded, dict):
             raise ValueError(f'設定ファイル {path} の最上位は {{...}} の形で書いてください')
+    return check(loaded, path)
+
+
+def check(loaded: dict, path: Path) -> dict:
+    """書いた項目を既定に重ね、確かめて返す。誤りは、原因が分かる文で失敗する。"""
     value = _merge(DEFAULTS, loaded)
     _validate(value, path)
     return value
 
 
 def reload() -> None:
-    config.cache_clear()
+    _loaded['stamp'] = None
 
 
 def _validate(value: dict, path: Path) -> None:
-    engine = value['analysis']['engine']
-    if engine not in ('claude_cli', 'none'):
-        raise ValueError(f'設定 analysis.engine は claude_cli か none です（{engine!r}）: {path}')
+    ai = value['ai']
+    for role in ('advice', 'analysis'):
+        spec = ai[role]
+        if spec is not None and (not isinstance(spec, str) or not spec.strip()):
+            raise ValueError(f'設定 ai.{role} は "会社/モデル" の文字列か null です（{spec!r}）: {path}')
+    if ai['advice'] and '/' not in ai['advice']:
+        raise ValueError(f'設定 ai.advice は "会社/モデル" の形で書いてください（例 openai/gpt-6-luna。{ai["advice"]!r}）: {path}')
+    if ai['analysis'] and '/' not in ai['analysis'] and ai['analysis'] != 'claude_cli':
+        raise ValueError(f'設定 ai.analysis は claude_cli か "会社/モデル" です（{ai["analysis"]!r}）: {path}')
+    if ai['transcription_check'] not in (None, 'openai'):
+        raise ValueError(f'設定 ai.transcription_check は "openai" か null です（{ai["transcription_check"]!r}）: {path}')
+    if not isinstance(ai['providers'], dict):
+        raise ValueError(f'設定 ai.providers は {{...}} の形で書いてください: {path}')
     delivery = value['delivery']
     enabled = [name for name in ('drive', 'slack', 'knowledge_base') if delivery[name]['enabled']]
-    if enabled and engine == 'none':
-        raise ValueError(f'設定 delivery.{enabled[0]} は分析の結果を届ける機能です。analysis.engine を claude_cli にしてください: {path}')
-    if value['negotiation_notes'] and engine == 'none':
-        raise ValueError(f'設定 negotiation_notes は分析で使います。analysis.engine を claude_cli にしてください: {path}')
+    if enabled and not ai['analysis']:
+        raise ValueError(f'設定 delivery.{enabled[0]} は分析の結果を届ける機能です。ai.analysis を書いてください: {path}')
+    if value['negotiation_notes'] and not ai['analysis']:
+        raise ValueError(f'設定 negotiation_notes は分析で使います。ai.analysis を書いてください: {path}')
+    search = delivery['knowledge_base']['enabled'] and delivery['knowledge_base']['search_command']
+    if search and not (ai['analysis'] or '').startswith('claude_cli'):
+        raise ValueError(f'設定 delivery.knowledge_base.search_command は、ai.analysis が claude_cli の時だけ使えます: {path}')
 
 
 def _need(value, name: str):
@@ -197,12 +238,23 @@ def context_projects_dir() -> Path:
     return Path(_need(config()['context']['projects_dir'], 'context.projects_dir')).expanduser()
 
 
+def ai_spec(role: str) -> str | None:
+    """設定 ai.advice / ai.analysis の値（"会社/モデル"、"claude_cli"、None）。"""
+    return config()['ai'][role]
+
+
 def analysis_engine() -> str:
-    return config()['analysis']['engine']
+    """none＝文字起こしの保存まで、claude_cli＝Claude Code、api＝設定に書いた会社の API かローカルの LLM。"""
+    spec = ai_spec('analysis')
+    if not spec:
+        return 'none'
+    return 'claude_cli' if spec.split('/', 1)[0] == 'claude_cli' else 'api'
 
 
 def analysis_model() -> str | None:
-    return config()['analysis']['model']
+    """claude_cli の時に claude --model へ渡す名前（claude_cli/名前 と書いた時だけ）。"""
+    spec = ai_spec('analysis') or ''
+    return spec.split('/', 1)[1] if spec.startswith('claude_cli/') else None
 
 
 def negotiation_notes() -> Path | None:
@@ -219,13 +271,14 @@ def cloud_allowed() -> bool:
     return os.environ.get('MICA_NO_CLOUD', '').strip() not in ('1', 'true', 'yes')
 
 
-@lru_cache(maxsize=1)
-def _stored_key() -> str:
-    key = os.environ.get('OPENAI_API_KEY', '').strip()
+@lru_cache(maxsize=None)
+def stored_key(env_name: str, keychain_service: str) -> str:
+    """鍵を、環境変数 → Keychain の順に探す。無ければ空文字。"""
+    key = os.environ.get(env_name, '').strip()
     if key:
         return key
     try:
-        result = subprocess.run(['security', 'find-generic-password', '-s', 'openai-api-key', '-w'],
+        result = subprocess.run(['security', 'find-generic-password', '-s', keychain_service, '-w'],
                                 capture_output=True, text=True, timeout=10, check=False)
         if result.returncode == 0:
             return result.stdout.strip()
@@ -234,13 +287,8 @@ def _stored_key() -> str:
     return ''
 
 
-def openai_key() -> str:
-    """鍵。つないでいなければ空文字。"""
-    return _stored_key() if cloud_allowed() else ''
-
-
-def require_openai_key() -> str:
-    key = openai_key()
-    if not key:
-        raise RuntimeError('OpenAI の鍵がつながっていません。会議中の助言と質問は、鍵をつなぐと使えます。')
-    return key
+def transcription_check_key() -> str:
+    """会議中の音声を OpenAI でも文字に起こす時の鍵。設定 ai.transcription_check が openai で、鍵がある時だけ返す。"""
+    if config()['ai']['transcription_check'] != 'openai' or not cloud_allowed():
+        return ''
+    return stored_key('OPENAI_API_KEY', 'openai-api-key')

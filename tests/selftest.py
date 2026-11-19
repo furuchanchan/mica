@@ -2,9 +2,10 @@
 """通しの確かめ：合成した日本語の会話を、録画アプリが出すのと同じ形（5秒ごとの音声）で置き、
 鍵なしで文字起こしが出るか、会議後に記録が保存されるかを見る。録画アプリと macOS の許可は通らない。
 
-  python3 tests/selftest.py            # 入れた先（app_support/service）のコードで確かめる
+  python3 tests/selftest.py              # 入れた先（app_support/service）のコードで確かめる。Mac の外へは何も送らない
+  python3 tests/selftest.py --connected  # つないだ AI で会議後の分析まで確かめる（合成の会話が、つないだ先へ送られる）
 作る会議は、設定の data_root の下の「<日時>_selftest」。終わっても消さない（中を見られるように）。
-外へは何も送らない（MICA_NO_CLOUD=1 を付けて動かす）。
+--connected を付けない時は MICA_NO_CLOUD=1 で動かすので、この Mac の中の LLM（Ollama など）だけが分析に使われる。
 """
 import json
 import os
@@ -43,7 +44,8 @@ def speak(text, voice, path):
 
 
 def main():
-    os.environ['MICA_NO_CLOUD'] = '1'
+    if '--connected' not in sys.argv[1:]:
+        os.environ['MICA_NO_CLOUD'] = '1'
     service = mica_config.app_support() / 'service'
     if not (service / 'shodan_live.py').is_file():
         raise SystemExit(f'{service} にサービスがありません。先に ./install.sh を動かしてください')
@@ -95,7 +97,7 @@ def main():
     if run.returncode or not segments:
         print(run.stdout[-2000:], run.stderr[-2000:])
         raise SystemExit('文字起こしが出ませんでした')
-    # 会議後：設定 analysis.engine が none なら文字起こしの保存まで、claude_cli なら分析まで
+    # 会議後：設定 ai.analysis が無ければ文字起こしの保存まで、あれば分析まで
     after = subprocess.run(['/usr/bin/python3', str(service / 'shodan_analyze.py'), str(folder)], capture_output=True, text=True, timeout=2400)
     status = json.loads((folder / 'analysis-status.json').read_text()) if (folder / 'analysis-status.json').is_file() else {}
     print(f'会議後: 終了コード {after.returncode}、{status.get("phase")}、{status.get("message")}')

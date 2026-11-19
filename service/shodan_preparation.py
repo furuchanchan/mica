@@ -9,6 +9,7 @@ import time
 from shodan_evidence import POLICY, safe_segment, clean_terms
 from shodan_text import effective_segments
 import mica_config
+import mica_llm
 from shodan_context import store, redact
 from shodan_calendar import CALENDAR, choose_event, epoch, event_key, plain
 from shodan_session import atomic_json, load_json, read_brief, lock, append_json
@@ -121,6 +122,11 @@ def run_once(folder,force=False):
                 prep.update(status='ready',message=basis+('。'+warning if warning else ''))
                 if matched.get('match_reason') and not matched.get('text'):prep['message']+='。関連するClaude会話は特定できませんでした'
                 merge(folder,event,context,redact(result['purpose']),ends,prep,result.get('recognition_terms', []),[redact(t) for t in result.get('todos', [])])
+                atomic_json(folder/'preparation-status.json',{'checked_at':time.time(),'status':'ready','fingerprint':fingerprint})
+            except mica_llm.NotConnected:
+                # AI をつないでいない時は、予定と背景をそのまま使う（失敗として見せない）
+                prep.update(status='ready',message=basis+'。目的の自動整理は、AI をつなぐと使えます')
+                merge(folder,event,context,plain(reference.get('title')),ends,prep)
                 atomic_json(folder/'preparation-status.json',{'checked_at':time.time(),'status':'ready','fingerprint':fingerprint})
             except (OSError,RuntimeError,ValueError,KeyError):
                 prep.update(status='error',message='目的の自動整理を完了できませんでした。取得済みの予定・背景は利用できます。')

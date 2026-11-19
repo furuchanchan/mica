@@ -87,7 +87,7 @@ struct MeetingContext: Decodable {
 struct Source: Decodable, Identifiable { let id: String; let title: String; let updated_at: String }
 struct Sources: Decodable { let sources: [Source] }
 struct Install: Decodable { var status: String?; var message: String? }
-// つないである機能。advice＝OpenAI の鍵（会議中の助言と質問）、analysis＝設定 analysis.engine（会議後の分析）
+// つないである機能。advice＝設定 ai.advice（会議中の助言と質問）、analysis＝設定 ai.analysis（会議後の分析）
 struct Capabilities: Decodable { var advice: Bool?; var analysis: Bool? }
 struct APIError: Decodable { let error: String }
 
@@ -630,9 +630,9 @@ struct MicaView: View {
             if model.answer.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "waveform").font(.system(size: 28, weight: .light)).foregroundStyle(mint.opacity(0.85))
-                    Text(!adviceConnected ? "助言は、OpenAI の鍵をつなぐと使えます" : model.isThinking ? "質問への回答を考えています" : model.isAutoThinking ? "自動ヒントを考えています" : model.meeting.segments.isEmpty ? "会話を待っています" : ended ? "この会議について聞く" : "いま、何を確認する？")
+                    Text(!adviceConnected ? "助言は、AI をつなぐと使えます" : model.isThinking ? "質問への回答を考えています" : model.isAutoThinking ? "自動ヒントを考えています" : model.meeting.segments.isEmpty ? "会話を待っています" : ended ? "この会議について聞く" : "いま、何を確認する？")
                         .font(.system(size: 19, weight: .medium))
-                    Text(!adviceConnected ? "録音と文字起こしは、鍵なしでこのまま使えます。つなぎ方は README の「つなぐと増える機能」にあります。" : !model.meeting.segments.isEmpty ? (ended ? "会議は終わっています。記録をもとに、下から質問できます。" : "自動ヒントの作成中も、下から質問できます。") : model.meeting.recording == nil ? "対面の会議は、予定の時刻か右上の［録音する］で始まります。" : "会議が始まると、ここに提案が届きます。")
+                    Text(!adviceConnected ? "録音と文字起こしは、このまま使えます。\nAI をつなぐ時は、ターミナルで ./mica connect を実行します。" : !model.meeting.segments.isEmpty ? (ended ? "会議は終わっています。記録をもとに、下から質問できます。" : "自動ヒントの作成中も、下から質問できます。") : model.meeting.recording == nil ? "対面の会議は、予定の時刻か右上の［録音する］で始まります。" : "会議が始まると、ここに提案が届きます。")
                         .font(.system(size: 12)).foregroundStyle(.white.opacity(0.65))
                     if model.isThinking || model.isAutoThinking { ProgressView().controlSize(.small) }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -693,7 +693,7 @@ struct MicaView: View {
                 if let text = model.meeting.analysis?.text, !text.isEmpty { ReportText(text: text) }
                 else {
                     Label("会議後のまとめ", systemImage: "checkmark.bubble").font(.system(size: 15, weight: .medium))
-                    Text(model.meeting.analysis?.message ?? (model.meeting.capabilities?.analysis == false ? "会議が終わると、文字起こしを保存します。分析は、Claude をつなぐと使えます（README の「つなぐと増える機能」）。" : "会議が終わると、文字起こしと相談を引き継いで分析します。"))
+                    Text(model.meeting.analysis?.message ?? (model.meeting.capabilities?.analysis == false ? "会議が終わると、文字起こしを保存します。分析は、AI をつなぐと使えます（ターミナルで ./mica connect）。" : "会議が終わると、文字起こしと相談を引き継いで分析します。"))
                         .font(.system(size: 13)).foregroundStyle(.white.opacity(0.72)).lineSpacing(5)
                     if let memory = model.meeting.memory, let summary = memory.summary, !summary.isEmpty {
                         Divider()
@@ -743,7 +743,7 @@ struct MicaView: View {
                 }.buttonStyle(QuietButton()).disabled(!canAsk)
             }
             HStack(spacing: 10) {
-                TextField(adviceConnected ? "会話について聞く…" : "OpenAI の鍵をつなぐと質問できます", text: $model.question, axis: .vertical)
+                TextField(adviceConnected ? "会話について聞く…" : "AI をつなぐと質問できます", text: $model.question, axis: .vertical)
                     .textFieldStyle(.plain).font(.system(size: 14)).lineLimit(1...3).accessibilityLabel("AIへの質問")
                 if model.panel == "transcript" { questionMenu.disabled(!canAsk) }
                 if !model.compact { Text("⌘ ↵").font(.system(size: 11)).foregroundStyle(.white.opacity(0.5)) }

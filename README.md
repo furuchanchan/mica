@@ -1,7 +1,7 @@
 # Mica
 
 Mac の会議アシスタントです。会議が始まると自動で録り、Mac の中で文字に起こし、終わると記録を残します。
-鍵もアカウントも無しで動きます。OpenAI や Claude をつなぐと、つないだ分だけ機能が増えます。
+鍵もアカウントも無しで動きます。この Mac の LLM（Ollama など）や、OpenAI・Claude・Gemini などの鍵をつなぐと、つないだ分だけ機能が増えます。
 
 ![鍵なしで会議が終わった後の画面](docs/after-meeting-no-key.png)
 
@@ -10,12 +10,14 @@ Mac の会議アシスタントです。会議が始まると自動で録り、M
 | 段 | つなぐ物 | 増える機能 |
 |---|---|---|
 | 1 | なし | 録音と録画、Mac の中の文字起こし、自分と相手の区別、記録の保存 |
-| 2 | OpenAI の API の鍵 | 会議中の助言と質問、文字起こしの2重確認（API の認識と Mac の中の認識を比べる） |
-| 3 | Claude（契約か API の鍵） | 会議後の分析（結論・決まったこと・次やること。発言の引用つき） |
+| 2 | 会議中の AI（設定 `ai.advice`） | 会議中の助言と質問、会議前の目的の整理 |
+| 3 | 会議後の AI（設定 `ai.analysis`） | 会議後の分析（結論・決まったこと・次やること。発言の引用つき） |
 
+- 段2と段3は別々につなげます。片方だけでも、別々の会社でも構いません。
+- つなぐ先はこの Mac の LLM（Ollama・LM Studio）、各社の API の鍵（OpenAI・Anthropic・Gemini・OpenRouter・Groq）、Claude Code、OpenAI 互換のサーバーから選べます。
 - Zoom・Google Meet・Teams・Slack ハドルなど、アプリがマイクを使い始めると録り始めます。相手が主催の会議も録れます。
 - 対面の会議は Mica の［録音する］で録ります。
-- 段1では音声も文字も Mac の外へ出ません。
+- 段1では音声も文字も Mac の外へ出ません。この Mac の LLM だけをつないだ時も同じです。
 
 ## 要る物
 
@@ -48,36 +50,73 @@ cd mica
 python3 tests/selftest.py
 ```
 
+つないだ AI で会議後の分析まで確かめる時は `--connected` を付けます。合成の会話がつないだ先へ送られます。
+
 外す時は `./uninstall.sh`。録音と設定は残ります。
 
-## つなぐと増える機能
-
-### 段2：OpenAI の鍵（会議中の助言と質問）
-
-鍵を Keychain に入れて、Mica を開き直します。
+## AI をつなぐ
 
 ```bash
-security add-generic-password -s openai-api-key -a mica -w
+./mica connect
 ```
 
-環境変数 `OPENAI_API_KEY` でも読みます。つなぐと、会議中の音声の一部と文字起こしが OpenAI へ送られます。
-鍵があっても送りたくない時は、環境変数 `MICA_NO_CLOUD=1` を付けます。
+聞かれた順に、つなぐ先・モデル・使い道（会議中の助言、会議後の分析、両方）を答えます。鍵は Keychain に入り、設定ファイルには入りません。
+つないだ後に試しの呼び出しを1回して、通らなければ設定を元に戻します。開いている Mica は次の会議から新しいつなぎ先を使います。
 
-### 段3：Claude（会議後の分析）
+| 名前 | つなぐ物 | 鍵の環境変数 |
+|---|---|---|
+| `ollama` | この Mac の [Ollama](https://ollama.com)。Mac の外へ送らない | なし |
+| `lmstudio` | この Mac の [LM Studio](https://lmstudio.ai)。Mac の外へ送らない | なし |
+| `openai` | OpenAI の API | `OPENAI_API_KEY` |
+| `anthropic` | Anthropic（Claude）の API | `ANTHROPIC_API_KEY` |
+| `gemini` | Google Gemini の API | `GEMINI_API_KEY` |
+| `openrouter` | OpenRouter | `OPENROUTER_API_KEY` |
+| `groq` | Groq | `GROQ_API_KEY` |
+| `claude_cli` | [Claude Code](https://claude.com/claude-code)（Claude の契約か API の鍵）。会議後の分析だけ | なし（下の「Claude Code の認証」） |
+| 自分で付ける名前 | OpenAI 互換のサーバー（vLLM、LiteLLM のプロキシ、社内のサーバーなど） | 自分で決める |
 
-[Claude Code](https://claude.com/claude-code) を入れてログインし、設定ファイルに次を書きます。
+鍵は表の環境変数、Keychain の `<名前>-api-key` の順に探します。
 
-```json
-{"analysis": {"engine": "claude_cli"}}
+聞かれずにつなぐ時は、引数で渡します。
+
+```bash
+./mica connect ollama --model gemma3:4b --advice --analysis    # この Mac の中だけで全部動かす
+./mica connect openai --model gpt-6-luna --advice              # 会議中の助言を OpenAI に
+./mica connect claude_cli                                      # 会議後の分析を Claude Code に
+./mica connect myserver --base-url http://192.168.1.10:8000/v1 --model my-model --analysis
 ```
 
-分析は `claude -p` で動きます。認証は次の順に探します。
+今の状態を見る時と、外す時は次のとおりです。
+
+```bash
+./mica status            # 今どの段まで使えるか、Mac の外のどこへ送るか
+./mica doctor            # 入っている物を確かめ、つないだ先を実際に1回ずつ試す
+./mica disconnect all    # advice・analysis・check のどれかだけも外せる
+```
+
+### 送る先の決まり
+
+- 送るのは、設定 `ai` に書いた先だけです。鍵が Mac にあるだけでは何も送りません。
+- つながらない時に、別の会社やクラウドへ切り替えません。失敗は画面に理由を出します。
+- 環境変数 `MICA_NO_CLOUD=1` を付けると、設定に書いてあっても、この Mac の中のサーバーにだけ送ります。
+- 段2では会議の文字起こしが、段3では文字起こしが、つないだ先へ送られます。`claude_cli` の分析では画面の静止画も送られます。
+
+### 選び方の目安
+
+- Mac の外へ出したくない時は `ollama` か `lmstudio` を選びます。小さいモデル（4B 前後）では、分析で選ばれる発言が少なく、提案も薄くなります。
+- 分析の質を取りたい時は `claude_cli`・`anthropic`・`openai` を選びます。分析の間に画面の静止画を読むのは `claude_cli` だけです。
+- 分析は、AI が発言の番号を選び、Mica が録音の原文をそのまま引用して組み立てます。AI が無い番号を返した時は、分析を出さずに止めます。
+- 文字起こしの誤りを減らしたい時は、設定 `ai.transcription_check` を `openai` にします（`./mica connect openai --transcription-check`）。会議中の音声が OpenAI へ送られ、Mac の中の認識と比べます。
+
+### Claude Code の認証
+
+`claude_cli` の分析は `claude -p` で動きます。認証は次の順に探します。
 
 1. Keychain の `claude-code-oauth-token`（`claude setup-token` で作る長期トークン。Claude の契約で動かす時）
 2. Keychain の `anthropic-api-key`（API の鍵で動かす時）
 3. Claude Code の通常のログイン
 
-分析では、文字起こしと画面の静止画が Anthropic へ送られます。会議の発言は他人の言葉なので、分析の間、Claude が使える道具はファイルの読み書きだけに絞っています。
+会議の発言は他人の言葉なので、分析の間、Claude が使える道具はファイルの読み書きだけに絞っています。
 
 ## 設定
 
@@ -90,8 +129,10 @@ security add-generic-password -s openai-api-key -a mica -w
 | `ffmpeg` | PATH から探す | ffmpeg の場所 |
 | `user_name` | `自分` | 分析の文で自分を指す呼び名 |
 | `ignore_mic_apps` | `[]` | マイクを使っても会議と見なさないアプリの bundle id（前方一致）。音声入力アプリなど |
-| `analysis.engine` | `none` | `claude_cli` で会議後の分析をする。`none` は文字起こしの保存まで |
-| `analysis.model` | null | `claude --model` に渡す名前。null なら Claude Code の既定 |
+| `ai.advice` | null | 会議中の助言と質問に使う先。`名前/モデル`（例 `openai/gpt-6-luna`、`ollama/gemma3:4b`） |
+| `ai.analysis` | null | 会議後の分析に使う先。`claude_cli`（`claude_cli/モデル名` も可）か `名前/モデル`。null は文字起こしの保存まで |
+| `ai.transcription_check` | null | `openai` で、会議中の音声を OpenAI でも文字に起こし、Mac の中の認識と比べる |
+| `ai.providers` | `{}` | 自分で足す OpenAI 互換のサーバー。`{"名前": {"base_url": "http://…/v1", "api_key_env": "環境変数の名前"}}`。組み込みの名前で書くと、その URL を上書きする |
 | `calendar.enabled` | false | Google カレンダーを読む（会議の題、目的の準備、予定の時刻での対面の録音） |
 | `calendar.account` / `.calendars` / `.personal_calendar` | null / `["primary"]` / null | 読むアカウント、読む暦、対面でも自動で録らない暦 |
 | `google_credentials_dir` | `~/.google_workspace_mcp/credentials` | `<アカウント>.json`（client_id・client_secret・refresh_token）の置き場 |
@@ -101,8 +142,9 @@ security add-generic-password -s openai-api-key -a mica -w
 | `context.*` | オフ | 過去の Claude Code の会話から、会議の背景を探す |
 | `negotiation_notes` | null | 商談の技の台帳（Markdown）。あると、商談の分析で進め方を採点する |
 
-`delivery.*` と `negotiation_notes` は、`analysis.engine` が `claude_cli` の時だけ使えます。
-`delivery.knowledge_base.search_command` を書くと、分析の Claude はコマンドも使えるようになります。
+`ai` の4項目は `./mica connect` が書きます。手で書いても構いません。
+`delivery.*` と `negotiation_notes` は、`ai.analysis` を書いた時だけ使えます。
+`delivery.knowledge_base.search_command` は `ai.analysis` が `claude_cli` の時だけ使えます。書くと、分析の Claude はコマンドも使えるようになります。
 
 ## 録音について
 
@@ -115,6 +157,8 @@ security add-generic-password -s openai-api-key -a mica -w
 - `service/shodan_asr_service.py` 音声認識の常駐（mlx-whisper の whisper-large-v3-turbo）
 - `service/shodan_live.py` 会議中の文字起こしと、画面が読むサーバー
 - `service/shodan_analyze.py` 会議後の文字起こしの保存と分析
+- `service/mica_llm.py` 外の AI と、この Mac の LLM を呼ぶ所（OpenAI の Responses API、Anthropic の Messages API、OpenAI 互換の Chat Completions）
+- `mica` つなぎ先を見る・つなぐ・確かめる道具
 - `app/` Mica.app（SwiftUI）
 - 常駐のログは `~/Library/Application Support/Mica/logs/` に出ます
 
@@ -130,13 +174,15 @@ export MICA_APP_PORT=18870 MICA_LIVE_PORT=18868
 python3 tests/selftest.py
 ```
 
-試験は `service/test_*.py`（`python3 service/test_echo.py` など）と `tests/selftest.py`。
+試験は `service/test_*.py`（`python3 service/test_llm.py` など）と `tests/selftest.py`。`test_llm.py` は、この Mac の中に立てた偽のサーバーで、つなぎ先ごとの呼び方を確かめます。
 
 ## 既知の制約
 
 - 文字起こしは日本語だけです。
 - Mac の中の認識は、API の認識より誤りが多くなります。数字や固有名詞は録音で確かめてください。
 - 話者分けは推定です。相手が複数いると取り違えることがあります。
+- つなぎ先のうち、実物で確かめたのは Ollama・OpenAI・Claude Code です。Anthropic の API・Gemini・OpenRouter・Groq・LM Studio は、各社が公開している仕様に合わせて書いてあります。動かない時は Issue で知らせてください。
+- 0.11 の設定 `analysis.engine` は `ai.analysis` に替わりました。0.11 では OpenAI の鍵があるだけで助言が動きましたが、0.12 からは `./mica connect openai` でつないだ時だけ動きます。
 - 無保証です。macOS の更新で動かなくなることがあります。
 
 ## ライセンス
