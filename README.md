@@ -17,7 +17,7 @@ Mac の会議アシスタントです。会議が始まると自動で録り、M
 - つなぐ先はこの Mac の LLM（Ollama・LM Studio）、各社の API の鍵（OpenAI・Anthropic・Gemini・OpenRouter・Groq）、Claude Code、OpenAI 互換のサーバーから選べます。
 - Zoom・Google Meet・Teams・Slack ハドルなど、アプリがマイクを使い始めると録り始めます。相手が主催の会議も録れます。
 - 対面の会議は Mica の［録音する］で録ります。
-- 段1では音声も文字も Mac の外へ出ません。この Mac の LLM だけをつないだ時も同じです。
+- 段1では音声も文字も Mac の外へ出ません。この Mac の LLM だけをつないだ時も同じです（下のカレンダー・外部への保存や配信を別にオンにした場合を除く）。
 
 ## 要る物
 
@@ -61,7 +61,7 @@ python3 tests/selftest.py
 ```
 
 聞かれた順に、つなぐ先・モデル・使い道（会議中の助言、会議後の分析、両方）を答えます。鍵は Keychain に入り、設定ファイルには入りません。
-つないだ後に試しの呼び出しを1回して、通らなければ設定を元に戻します。開いている Mica は次の会議から新しいつなぎ先を使います。
+API・この Mac の LLM は、試しの呼び出しが通ってから設定を保存します。Claude Code と文字起こしの2重確認は、つなぐ時には呼び出しを試しません。開いている Mica は次の呼び出しから新しいつなぎ先を使います。
 
 | 名前 | つなぐ物 | 鍵の環境変数 |
 |---|---|---|
@@ -96,9 +96,10 @@ python3 tests/selftest.py
 
 ### 送る先の決まり
 
-- 送るのは、設定 `ai` に書いた先だけです。鍵が Mac にあるだけでは何も送りません。
+- AI に送るのは、設定 `ai` に書いた先だけです。鍵が Mac にあるだけでは何も送りません。カレンダー・外部への保存や配信は、それぞれの設定をオンにした時だけ使います。
 - つながらない時に、別の会社やクラウドへ切り替えません。失敗は画面に理由を出します。
-- 環境変数 `MICA_NO_CLOUD=1` を付けると、設定に書いてあっても、この Mac の中のサーバーにだけ送ります。
+- 環境変数 `MICA_NO_CLOUD=1` を付けると、設定に書いてあっても、この Mac の中のサーバーにだけ送ります。カレンダー・外部への保存や配信も止めます。
+- つないだ先が別の URL へ転送（リダイレクト）しても従いません。設定には転送の無い URL を書いてください。
 - 段2では会議の文字起こしが、段3では文字起こしが、つないだ先へ送られます。`claude_cli` の分析では画面の静止画も送られます。
 
 ### 選び方の目安
@@ -106,7 +107,7 @@ python3 tests/selftest.py
 - Mac の外へ出したくない時は `ollama` か `lmstudio` を選びます。小さいモデル（4B 前後）では、分析で選ばれる発言が少なく、提案も薄くなります。
 - 分析の質を取りたい時は `claude_cli`・`anthropic`・`openai` を選びます。分析の間に画面の静止画を読むのは `claude_cli` だけです。
 - 分析は、AI が発言の番号を選び、Mica が録音の原文をそのまま引用して組み立てます。AI が無い番号を返した時は、分析を出さずに止めます。
-- 文字起こしの誤りを減らしたい時は、設定 `ai.transcription_check` を `openai` にします（`./mica connect openai --transcription-check`）。会議中の音声が OpenAI へ送られ、Mac の中の認識と比べます。
+- 文字起こしの誤りを減らしたい時は、設定 `ai.transcription_check` を `openai` にします（`./mica connect openai --transcription-check`）。会議中の音声が OpenAI へ送られ、Mac の中の認識と比べます。`ai.providers.openai` を書いた時は、その URL と鍵の設定を使います。音声の API に対応した先が必要です。
 
 ### Claude Code の認証
 
@@ -116,7 +117,7 @@ python3 tests/selftest.py
 2. Keychain の `anthropic-api-key`（API の鍵で動かす時）
 3. Claude Code の通常のログイン
 
-会議の発言は他人の言葉なので、分析の間、Claude が使える道具はファイルの読み書きだけに絞っています。
+会議の発言は他人の言葉なので、分析の間、Claude に道具（ファイル・コマンド・MCP）を持たせません。Mica が文字起こしと画面の静止画を渡し、返った JSON を確かめて保存します。Claude Code の個人とプロジェクトの設定やフックも読み込みません。
 
 ## 設定
 
@@ -138,13 +139,12 @@ python3 tests/selftest.py
 | `google_credentials_dir` | `~/.google_workspace_mcp/credentials` | `<アカウント>.json`（client_id・client_secret・refresh_token）の置き場 |
 | `delivery.drive.*` | オフ | 動画を Google ドライブへ上げ、内容の一致を確かめてから Mac の動画を消す |
 | `delivery.slack.*` | オフ | 分析と失敗を Slack へ届ける。`command` は argv の配列で、本文を標準入力に受け取る |
-| `delivery.knowledge_base.*` | オフ | 分析ページを自分の知識ベースへ入れる（`ingest_command`）。分析の時に過去の文脈を引く（`search_command`） |
+| `delivery.knowledge_base.*` | オフ | 分析ページを自分の知識ベースへ入れる（`ingest_command`） |
 | `context.*` | オフ | 過去の Claude Code の会話から、会議の背景を探す |
 | `negotiation_notes` | null | 商談の技の台帳（Markdown）。あると、商談の分析で進め方を採点する |
 
 `ai` の4項目は `./mica connect` が書きます。手で書いても構いません。
 `delivery.*` と `negotiation_notes` は、`ai.analysis` を書いた時だけ使えます。
-`delivery.knowledge_base.search_command` は `ai.analysis` が `claude_cli` の時だけ使えます。書くと、分析の Claude はコマンドも使えるようになります。
 
 ## 録音について
 
@@ -174,14 +174,14 @@ export MICA_APP_PORT=18870 MICA_LIVE_PORT=18868
 python3 tests/selftest.py
 ```
 
-試験は `service/test_*.py`（`python3 service/test_llm.py` など）と `tests/selftest.py`。`test_llm.py` は、この Mac の中に立てた偽のサーバーで、つなぎ先ごとの呼び方を確かめます。
+試験は `service/test_*.py`（`python3 service/test_llm.py` など）と `tests/selftest.py`。`service/test_*.py` は通信せずに確かめます。
 
 ## 既知の制約
 
 - 文字起こしは日本語だけです。
 - Mac の中の認識は、API の認識より誤りが多くなります。数字や固有名詞は録音で確かめてください。
 - 話者分けは推定です。相手が複数いると取り違えることがあります。
-- つなぎ先のうち、実物で確かめたのは Ollama・OpenAI・Claude Code です。Anthropic の API・Gemini・OpenRouter・Groq・LM Studio は、各社が公開している仕様に合わせて書いてあります。動かない時は Issue で知らせてください。
+- つなぎ先のうち、実物で確かめたのは Ollama・OpenAI・Claude Code です。Anthropic の API・Gemini・OpenRouter・Groq・LM Studio は、各社が公開している仕様に合わせて書いてあり、実際の接続はまだ確かめていません。動かない時は Issue で知らせてください。
 - 0.11 の設定 `analysis.engine` は `ai.analysis` に替わりました。0.11 では OpenAI の鍵があるだけで助言が動きましたが、0.12 からは `./mica connect openai` でつないだ時だけ動きます。
 - 無保証です。macOS の更新で動かなくなることがあります。
 

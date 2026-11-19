@@ -12,6 +12,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 import mica_config
+import mica_http
 from shodan_context import redact
 from shodan_session import atomic_json, load_json, lock
 
@@ -23,10 +24,12 @@ ONLINE_WORDS=re.compile(r'オンライン|online|zoom|teams|meet\.google|google 
 CACHE=mica_config.app_support()/'calendar.json'
 
 def _token():
+    if not mica_config.calendar_enabled() or not mica_config.cloud_allowed():
+        raise RuntimeError('カレンダーへの通信はオフです。calendar.enabled と MICA_NO_CLOUD の設定を確かめてください。')
     with (mica_config.google_credentials_dir()/f"{mica_config.calendar_settings()['account']}.json").open() as f:c=json.load(f)
     body=urllib.parse.urlencode({'client_id':c['client_id'],'client_secret':c['client_secret'],'refresh_token':c['refresh_token'],'grant_type':'refresh_token'}).encode()
-    request=urllib.request.Request(c.get('token_uri','https://oauth2.googleapis.com/token'),data=body)
-    with urllib.request.urlopen(request,timeout=15) as response:return json.load(response)['access_token']
+    request=urllib.request.Request('https://oauth2.googleapis.com/token',data=body)
+    with mica_http.urlopen(request,timeout=15) as response:return json.load(response)['access_token']
 
 def plain(value):
     text=html.unescape(re.sub('<[^>]+>',' ',str(value or '')))
@@ -72,7 +75,7 @@ def fetch_events():
                 q={'timeMin':(now-dt.timedelta(hours=4)).isoformat(),'timeMax':(now+dt.timedelta(hours=36)).isoformat(),'singleEvents':'true','maxResults':'100','orderBy':'startTime'}
                 if page:q['pageToken']=page
                 url=f'https://www.googleapis.com/calendar/v3/calendars/{urllib.parse.quote(cal,safe="")}/events?'+urllib.parse.urlencode(q)
-                with urllib.request.urlopen(urllib.request.Request(url,headers={'Authorization':'Bearer '+token}),timeout=15) as response:data=json.load(response)
+                with mica_http.urlopen(urllib.request.Request(url,headers={'Authorization':'Bearer '+token}),timeout=15) as response:data=json.load(response)
                 for ev in data.get('items',[]):
                     if not (eligible(ev) or in_person(ev,cal)):continue
                     key=(ev.get('iCalUID',ev['id']),ev['start']['dateTime'])
@@ -146,6 +149,8 @@ class CalendarStore:
                 atomic_json(self.path,value);return value
         except BlockingIOError:return load_json(self.path,{})
     def snapshot(self):
+        if not mica_config.calendar_enabled() or not mica_config.cloud_allowed():
+            return {'events': [], 'error': None}
         value=load_json(self.path,{})
         with self.guard:
             if time.time()-value.get('checked_at',0)>=300 and (self.thread is None or not self.thread.is_alive()):

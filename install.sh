@@ -17,6 +17,10 @@ APP="${MICA_APP_DIR:-$HOME/Applications}/Mica.app"
 
 [ "$(uname -sm)" = "Darwin arm64" ] || { echo "Apple シリコンの Mac が要ります"; exit 1; }
 [ "$(sw_vers -productVersion | cut -d. -f1)" -ge 26 ] || { echo "macOS 26 以上が要ります"; exit 1; }
+xcrun --find swiftc >/dev/null 2>&1 || { echo "Xcode のコマンドラインツールが使えません。xcode-select --install で入れてから、もう一度実行してください"; exit 1; }
+if pgrep -x mica-recorder >/dev/null; then
+  echo "録音中です。入れ替えていません。録音が終わってから、もう一度実行してください"; exit 1
+fi
 for tool in swiftc uv ffmpeg; do
   command -v $tool >/dev/null || { echo "$tool が見つかりません。README の「要る物」を入れてください"; exit 1; }
 done
@@ -41,23 +45,32 @@ if [ $AGENTS = 1 ]; then
   for agent in watch:shodan_watch.py:60 asr:shodan_asr_service.py:10; do
     name=${agent%%:*}; rest=${agent#*:}; script=${rest%%:*}; throttle=${rest#*:}
     plist="$HOME/Library/LaunchAgents/app.mica.$name.plist"
-    cat > "$plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>Label</key><string>app.mica.$name</string>
-<key>ProgramArguments</key><array><string>/usr/bin/python3</string><string>$SUPPORT/service/$script</string></array>
-<key>EnvironmentVariables</key><dict>
-<key>PYTHONDONTWRITEBYTECODE</key><string>1</string>
-<key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-</dict>
-<key>RunAtLoad</key><true/>
-<key>KeepAlive</key><true/>
-<key>ThrottleInterval</key><integer>$throttle</integer>
-<key>StandardOutPath</key><string>$SUPPORT/logs/$name.log</string>
-<key>StandardErrorPath</key><string>$SUPPORT/logs/$name.log</string>
-</dict></plist>
-PLIST
+    /usr/bin/python3 - "$plist" "$name" "$SUPPORT" "$script" "$throttle" <<'PY'
+import os
+from pathlib import Path
+import plistlib
+import sys
+
+output, name, support, script, throttle = sys.argv[1:]
+env = {
+    'PYTHONDONTWRITEBYTECODE': '1',
+    'PATH': str(Path.home() / '.local/bin') + ':/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+    'MICA_APP_SUPPORT': support,
+}
+for key in ('MICA_CONFIG', 'MICA_APP_DIR', 'MICA_APP_PORT', 'MICA_LIVE_PORT', 'MICA_NO_CLOUD'):
+    if key in os.environ:
+        env[key] = os.environ[key]
+value = {
+    'Label': 'app.mica.' + name,
+    'ProgramArguments': ['/usr/bin/python3', str(Path(support) / 'service' / script)],
+    'EnvironmentVariables': env, 'RunAtLoad': True, 'KeepAlive': True,
+    'ThrottleInterval': int(throttle),
+    'StandardOutPath': str(Path(support) / 'logs' / (name + '.log')),
+    'StandardErrorPath': str(Path(support) / 'logs' / (name + '.log')),
+}
+with open(output, 'wb') as destination:
+    plistlib.dump(value, destination)
+PY
     launchctl bootout "gui/$(id -u)/app.mica.$name" 2>/dev/null || true
     launchctl bootstrap "gui/$(id -u)" "$plist"
   done

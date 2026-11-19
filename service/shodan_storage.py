@@ -18,6 +18,7 @@ import urllib.parse
 import urllib.request
 
 import mica_config
+import mica_http
 
 ROOT = mica_config.data_root()
 CRED_DIR = mica_config.google_credentials_dir()
@@ -97,9 +98,8 @@ def analysis_complete(folder):
     marker = folder / 'analysis_complete.json'
     if marker.exists():
         return json.loads(marker.read_text()).get('hashes') == analysis_hashes(folder)
-    # Existing pipeline writes drive_url only AFTER the analyzer succeeds.
-    uploaded = (folder / 'drive_url.txt').stat().st_mtime_ns
-    return all((folder / n).stat().st_mtime_ns <= uploaded for n in ('analysis.md', 'transcript.md'))
+    # 更新日時だけでは分析の完了を証明できない。確認票が無い録画は残す。
+    return False
 
 
 def _pids_busy(folder, names):
@@ -134,18 +134,28 @@ def files_in_use(folder):
 
 
 def access_token(kind):
+    require_drive()
     account, _ = mica_config.drive_destination(kind)
     c = json.loads((CRED_DIR / (account + '.json')).read_text())
     body = urllib.parse.urlencode({k: c[k] for k in ('client_id', 'client_secret', 'refresh_token')} |
                                   {'grant_type': 'refresh_token'}).encode()
-    with urllib.request.urlopen(urllib.request.Request(c['token_uri'], data=body), timeout=30) as r:
+    with mica_http.urlopen(urllib.request.Request('https://oauth2.googleapis.com/token', data=body), timeout=30) as r:
         return json.load(r)['access_token']
 
 
+def require_drive():
+    if not mica_config.drive_enabled() or not mica_config.cloud_allowed():
+        raise RuntimeError('Drive への通信はオフです。delivery.drive.enabled と MICA_NO_CLOUD の設定を確かめてください。')
+
+
 def api(token, url, data=None, headers=None, method=None, timeout=60):
+    require_drive()
+    parsed = mica_http.validate_url(url)
+    if parsed.scheme != 'https' or parsed.hostname != 'www.googleapis.com' or parsed.port not in (None, 443):
+        raise RuntimeError('Drive が返した保存先を確認できません。録画を保持しました。Google ドライブの接続先を確かめてください。')
     req = urllib.request.Request(url, data=data, method=method,
                                  headers={'Authorization': 'Bearer ' + token, **(headers or {})})
-    return urllib.request.urlopen(req, timeout=timeout)
+    return mica_http.urlopen(req, timeout=timeout)
 
 
 def file_id(url):
@@ -178,6 +188,7 @@ def verify_remote(video, url, kind):
 
 
 def ensure_uploaded(folder, name, kind):
+    require_drive()
     if kind not in ('商談', '仕事', '私的'): raise ValueError('destination is not classified')
     folder = Path(folder); video = folder / 'video.mov'; marker = folder / 'drive_url.txt'
     if capture_busy(folder): raise ValueError('recording is active')
@@ -187,8 +198,11 @@ def ensure_uploaded(folder, name, kind):
     else:
         token = access_token(kind)
         _, dest = mica_config.drive_destination(kind)
-        query = urllib.parse.urlencode({'q': f"name='{dest}' and mimeType='application/vnd.google-apps.folder' and 'root' in parents and trashed=false", 'fields': 'files(id)'})
+        escaped = dest.replace('\\', '\\\\').replace("'", "\\'")
+        query = urllib.parse.urlencode({'q': f"name='{escaped}' and mimeType='application/vnd.google-apps.folder' and 'root' in parents and trashed=false", 'fields': 'files(id)'})
         with api(token, 'https://www.googleapis.com/drive/v3/files?' + query) as r: found = json.load(r)['files']
+        if len(found) > 1:
+            raise RuntimeError('同じ名前の保存先が複数あります。Drive のフォルダ名を別々にしてから再実行してください。')
         if found: parent = found[0]['id']
         else:
             with api(token, 'https://www.googleapis.com/drive/v3/files', json.dumps({'name': dest, 'mimeType': 'application/vnd.google-apps.folder'}).encode(), {'Content-Type': 'application/json'}, 'POST') as r: parent = json.load(r)['id']
@@ -209,6 +223,8 @@ def ensure_uploaded(folder, name, kind):
 
 
 def cleanup_recording(folder, apply=False):
+    if not mica_config.drive_enabled() or not mica_config.cloud_allowed():
+        return {'status': 'preserved', 'reason': 'Driveへの通信はオフです'}
     folder = Path(folder)
     if folder.is_symlink() or folder.resolve().parent != ROOT.resolve():
         return {'status': 'preserved', 'reason': 'outside recording root'}

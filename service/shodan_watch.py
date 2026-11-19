@@ -36,6 +36,7 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 import mica_config
+import mica_http
 APP = str(mica_config.app_support() / "MicaRecorder.app")  # 画面・マイクの録画アプリ（recorder/build.sh が作る）
 REC_BIN = os.path.join(APP, "Contents/MacOS/mica-recorder")
 ANALYZE = os.path.join(HERE, "shodan_analyze.py")
@@ -95,9 +96,9 @@ def take_request() -> str | None:
         os.unlink(REQUEST)
     except FileNotFoundError:
         pass
-    action, at = request.get("action"), request.get("at")
-    if action not in ("start", "stop") or not isinstance(at, (int, float)) or not 0 <= time.time() - at <= REQUEST_TTL:
-        log(f"record request ignored: {request}")
+    action, at = (request.get('action'), request.get('at')) if isinstance(request, dict) else (None, None)
+    if action not in ("start", "stop") or type(at) not in (int, float) or not 0 <= time.time() - at <= REQUEST_TTL:
+        log('録音の操作を読めませんでした。Mica の録音・停止ボタンをもう一度押してください。')
         return None
     log(f"record request: {action}")
     return action
@@ -184,11 +185,14 @@ class Room:
 
 
 def load_started() -> dict:
+    """対面の予定で録り始めた記録。壊れていたら空として扱い、見張り役は止めない（同じ予定をもう1回録ることはありうる）。"""
     try:
         started = json.loads(STARTED.read_text())
     except (OSError, ValueError):
         return {}
-    return {k: v for k, v in started.items() if time.time() - v < 2 * 86400}
+    if not isinstance(started, dict):
+        return {}
+    return {k: v for k, v in started.items() if type(v) in (int, float) and time.time() - v < 2 * 86400}
 
 
 def in_person_due(events: list[dict], started: dict, now: float) -> dict | None:
@@ -213,7 +217,7 @@ def start_live(folder: str) -> None:
     atomic_json(os.path.join(folder, "live-state.json"), {"title": "会議", "status": "準備中", "error": None, "segments": []})
     try:
         try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{mica_config.live_port()}/api/health", timeout=2) as response:
+            with mica_http.urlopen(f"http://127.0.0.1:{mica_config.live_port()}/api/health", timeout=2) as response:
                 if json.load(response).get("service") != "shodan-live":
                     raise RuntimeError(f"port {mica_config.live_port()} is used by another service")
         except urllib.error.URLError:
@@ -366,13 +370,19 @@ def start_recording(ev: dict | None, bundle: str | None, mode: str = "app",
 
 def stop_recording(pid: int | None, folder: str, seconds: float, silent_room: bool = False) -> None:
     if pid is not None:
-        os.kill(pid, signal.SIGTERM)
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass  # 停止直前に録画が終わっていても、保存済みの音声は分析する
         for _ in range(120):
             if not alive(pid):
                 break
             time.sleep(0.5)
         else:
-            os.kill(pid, signal.SIGKILL)
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
     log(f"stopped pid={pid} {int(seconds)}s {folder}")
     from shodan_session import atomic_json
     from shodan_live import WAITING_LIVE

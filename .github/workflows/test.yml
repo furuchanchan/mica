@@ -1,0 +1,19 @@
+name: test
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 構文（サービスが動く /usr/bin/python3 で確かめる）
+        run: |
+          /usr/bin/python3 --version
+          for f in mica service/*.py app/*.py tests/*.py setup/*.py; do /usr/bin/python3 -m py_compile "$f"; done
+          zsh -n install.sh uninstall.sh app/install.sh recorder/build.sh
+      - name: 試験
+        run: |
+          cd service
+          for t in test_*.py; do echo "== $t"; /usr/bin/python3 "$t"; done

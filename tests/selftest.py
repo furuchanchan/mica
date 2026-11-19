@@ -98,7 +98,7 @@ def main():
         print(run.stdout[-2000:], run.stderr[-2000:])
         raise SystemExit('文字起こしが出ませんでした')
     # 会議後：設定 ai.analysis が無ければ文字起こしの保存まで、あれば分析まで
-    after = subprocess.run(['/usr/bin/python3', str(service / 'shodan_analyze.py'), str(folder)], capture_output=True, text=True, timeout=2400)
+    after = subprocess.run(['/usr/bin/python3', str(service / 'shodan_analyze.py'), str(folder), '--local-only'], capture_output=True, text=True, timeout=2400)
     status = json.loads((folder / 'analysis-status.json').read_text()) if (folder / 'analysis-status.json').is_file() else {}
     print(f'会議後: 終了コード {after.returncode}、{status.get("phase")}、{status.get("message")}')
     if after.returncode:

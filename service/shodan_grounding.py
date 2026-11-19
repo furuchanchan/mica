@@ -60,7 +60,9 @@ def render_analysis(draft, ledger, frames=(), test=False):
         raise ValueError('会議の種別が不正です')
     headings = {1: '結論（3行）'} if kind == '私的' else WORK_HEADINGS if kind == '仕事' else SALES_HEADINGS
     sections = draft['sections']
-    if not isinstance(sections, list) or [s.get('number') if isinstance(s, dict) else None for s in sections] != list(headings):
+    if (not isinstance(sections, list)
+            or any(not isinstance(s, dict) or type(s.get('number')) is not int for s in sections)
+            or [s['number'] for s in sections] != list(headings)):
         raise ValueError('分析の章番号・順序が一致しません')
     sources = {row['id']: row for row in ledger['utterances']}
     frames = set(frames)
@@ -90,7 +92,8 @@ def render_analysis(draft, ledger, frames=(), test=False):
         if observations and (kind != '商談' or number != 4):
             raise ValueError('画像の観察は商談の第4章だけに置いてください')
         for observation in observations:
-            if not isinstance(observation, dict) or set(observation) != {'frame', 'text'} or observation['frame'] not in frames:
+            if (not isinstance(observation, dict) or set(observation) != {'frame', 'text'}
+                    or not isinstance(observation['frame'], str) or observation['frame'] not in frames):
                 raise ValueError('画像観察の出典が不正です')
             output.extend(['- 画像に関するAI観察（音声事実・合意ではありません） / ' + _plain(observation['frame']) + ': ' + _plain(observation['text']), ''])
     return '\n'.join(output)

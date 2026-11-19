@@ -3,6 +3,13 @@
 #   ./uninstall.sh            常駐・Mica.app・録画アプリ・サービスを外す
 #   ./uninstall.sh --runtimes 音声認識と話者分けの実行環境（約2GB）も消す
 set -euo pipefail
+RUNTIMES=0
+for arg in "$@"; do
+  case "$arg" in
+    --runtimes) RUNTIMES=1 ;;
+    *) echo "知らない引数です: $arg"; exit 1 ;;
+  esac
+done
 SUPPORT="${MICA_APP_SUPPORT:-$HOME/Library/Application Support/Mica}"
 APP="${MICA_APP_DIR:-$HOME/Applications}/Mica.app"
 if pgrep -x mica-recorder >/dev/null; then echo "録画中です。外していません"; exit 1; fi
@@ -15,5 +22,5 @@ if [ -d "$APP" ] && [ "$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" 
   rm -rf "$APP"
 fi
 rm -rf "$SUPPORT/MicaRecorder.app" "$SUPPORT/service"
-if [ "${1:-}" = --runtimes ]; then rm -rf "$SUPPORT/asr-runtime" "$SUPPORT/speaker-runtime"; fi
+if [ "$RUNTIMES" = 1 ]; then rm -rf "$SUPPORT/asr-runtime" "$SUPPORT/speaker-runtime"; fi
 echo "外しました。録音は残っています。"

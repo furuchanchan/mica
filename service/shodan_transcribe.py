@@ -25,6 +25,8 @@ import uuid
 import wave
 
 import mica_config
+import mica_http
+import mica_llm
 from shodan_evidence import canonical, numeric_keys, vocabulary, mark_verification, disputed, equivalent_text
 from shodan_text import assemble_clauses
 
@@ -99,16 +101,20 @@ def _multipart(fields: list[tuple[str, str]], path: Path) -> tuple[bytes, str]:
 
 
 def _post(fields, path):
+    found = mica_llm.transcription_connection()  # 音声を読む前にも、設定と送信先を確かめる
     body, boundary = _multipart(fields, path)
     request = urllib.request.Request(
-        'https://api.openai.com/v1/audio/transcriptions', method='POST', data=body,
-        headers={'Authorization': 'Bearer ' + mica_config.transcription_check_key(),
+        found['base_url'] + '/audio/transcriptions', method='POST', data=body,
+        headers={**({'Authorization': 'Bearer ' + found['key']} if found['key'] else {}),
                  'Content-Type': 'multipart/form-data; boundary=' + boundary})
     # One transport attempt here. The live worker owns the durable retry queue;
     # nested retries would hide the outage and hold two workers for minutes.
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            return json.load(response)
+        with mica_http.urlopen(request, timeout=60) as response:
+            result = json.load(response)
+        if not isinstance(result, dict):
+            raise ValueError()
+        return result
     except urllib.error.HTTPError as exc:
         code = exc.code
         exc.close()
@@ -415,7 +421,7 @@ def transcribe_verified(path, channel, offset, folder):
     if not ensure_ready(0):
         raise LocalRecognitionPending('音声認識の準備待ちです。未処理の録音は保存しています。')
     duration = _duration(Path(path))
-    if mica_config.transcription_check_key():
+    if mica_llm.transcription_connected():
         with ThreadPoolExecutor(max_workers=2) as pool:
             text_future = pool.submit(transcribe_text, path)
             voice_future = pool.submit(_anonymous_segments, path, channel, offset, folder)
@@ -748,7 +754,7 @@ def transcribe_batch(paths, channel, folder):
 def transcribe_draft(paths, channel, folder):
     audio, offset = _batch_audio(paths, folder)
     try:
-        if _silent(audio) or not mica_config.transcription_check_key():
+        if _silent(audio) or not mica_llm.transcription_connected():
             return []   # 2重確認なしでは速報（下書き）を出さず、確定の文字起こしだけを出す
         text = transcribe_text(audio)
         return ([{'id': Path(paths[0]).stem + '-draft', 'start': offset,

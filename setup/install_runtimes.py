@@ -71,7 +71,7 @@ def install_asr(uv, root):
                   "snapshot_download('mlx-community/whisper-large-v3-turbo', revision=sys.argv[2], cache_dir=sys.argv[1], "
                   "token=False, allow_patterns=['config.json', 'weights.safetensors', 'README.md'])")
         subprocess.run([str(python), '-c', script, str(MODEL.parents[2]), MODEL_REVISION], env=env, check=True)
-    if not (MODEL / 'weights.safetensors').is_file():
+    if not all((MODEL / name).is_file() for name in ('weights.safetensors', 'config.json')):
         raise SystemExit(f'音声認識のモデルが {MODEL} にありません')
     check = "import importlib.metadata as m,json;print(json.dumps({n:m.version(n) for n in ['mlx-whisper','mlx','numpy','torch']}))"
     versions = json.loads(subprocess.check_output([str(python), '-c', check], env=env, text=True))
@@ -83,6 +83,7 @@ def install_asr(uv, root):
 def install_speaker(uv, root):
     runtime = root / 'speaker-runtime'
     runtime.mkdir(parents=True, exist_ok=True)
+    os.chmod(runtime, 0o700)
     env = clean_env(runtime / 'uv-cache')
     python = venv(uv, runtime, env)
     subprocess.run([uv, '--no-config', 'pip', 'install', '--python', str(python), '--index-url', 'https://pypi.org/simple',

@@ -91,13 +91,13 @@ def _transcribe(folder, resume):
     state = {'title': meta.get('title', '会議'), 'status': '準備中', 'error': None,
              'segments': [], 'draft_segments': [], 'recorded_at': meta.get('recorded_at'), 'updated_at': time.time(),
              'in_person': bool(meta.get('in_person'))}
-    raw, seen = [], set()
+    raw, seen, previous = [], set(), {}
     if state_path.exists():
         previous = json.loads(state_path.read_text())
         raw, seen = previous.get('raw_segments', []), set(previous.get('processed_chunks', []))
-    state['transcript_revision'] = previous.get('transcript_revision', 0) if state_path.exists() else 0
+    state['transcript_revision'] = previous.get('transcript_revision', 0)
     drafts, failed, errors = {}, set(), []
-    retries = previous.get('retry_batches', {}) if state_path.exists() else {}
+    retries = previous.get('retry_batches', {})
     retries = {channel: value for channel, value in retries.items()
                if not set(value.get('chunks', [])).issubset(seen)}
     done_since = None
@@ -490,6 +490,8 @@ def sessions():
 
 class Handler(BaseHTTPRequestHandler):
     def authorized(self, write=False):
+        if self.headers.get('Sec-Fetch-Site') not in (None, 'none', 'same-origin'):
+            return False
         if self.headers.get('Host') not in (f'127.0.0.1:{PORT}', f'localhost:{PORT}'):
             return False
         origin = self.headers.get('Origin')

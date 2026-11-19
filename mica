@@ -40,7 +40,9 @@ DEFAULT_MODELS = {'openai': 'gpt-6-luna', 'anthropic': 'claude-opus-5-5'}
 def raw_config() -> dict:
     """設定ファイルに書いてある項目だけ（既定を重ねる前）。"""
     path = mica_config.config_path()
-    return json.loads(path.read_text()) if path.exists() else {}
+    raw = json.loads(path.read_text()) if path.exists() else {}
+    mica_config.check(raw, path)
+    return raw
 
 
 def write_config(raw: dict) -> None:
@@ -49,6 +51,7 @@ def write_config(raw: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + '.tmp')
     temporary.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + '\n')
+    os.chmod(temporary, 0o600)  # 鍵は入らないが、つなぎ先の URL が入るので本人だけが読める形にする
     temporary.replace(path)
     mica_config.reload()
 
@@ -78,6 +81,8 @@ def role_line(role: str) -> tuple:
     if not spec:
         return 'つないでいません', False, None
     if role == 'analysis' and mica_config.analysis_engine() == 'claude_cli':
+        if not mica_config.cloud_allowed():
+            return f'{spec}（MICA_NO_CLOUD=1 のため使いません）', False, None
         if not shutil.which('claude'):
             return f'{spec}（claude コマンドが見つかりません。Claude Code を入れてください）', False, None
         return f'{spec}（Claude Code）', True, 'Anthropic（Claude Code 経由）'
@@ -101,10 +106,24 @@ def status(_args) -> int:
             missing.append(role)
     check = mica_config.config()['ai']['transcription_check']
     if check:
-        ready = bool(mica_config.transcription_check_key())
-        print('       ' + pad('文字起こしの2重確認', 22) + f'{check}（{"使えます" if ready else "鍵が無いか、MICA_NO_CLOUD=1 のため使いません"}）')
-        if ready:
-            outside.append('OpenAI（音声）')
+        try:
+            audio = mica_llm.transcription_connection()
+        except (mica_llm.NotConnected, ValueError):
+            audio = None
+        print('       ' + pad('文字起こしの2重確認', 22) + f'{check}（{"使えます" if audio else "使えません。鍵・設定・MICA_NO_CLOUDを確認してください"}）')
+        if audio and not mica_llm.is_local(audio):
+            outside.append(audio['label'] + '（音声）')
+    value = mica_config.config()
+    integrations = [('calendar', value['calendar']['enabled'], 'Google Calendar'),
+                    ('drive', value['delivery']['drive']['enabled'], 'Google Drive'),
+                    ('slack', value['delivery']['slack']['enabled'], 'Slack'),
+                    ('knowledge_base', value['delivery']['knowledge_base']['enabled'], '知識ベースの外部コマンド')]
+    for name, enabled, destination in integrations:
+        if enabled:
+            active = mica_config.cloud_allowed()
+            print('       ' + pad(destination, 22) + ('有効' if active else 'MICA_NO_CLOUD=1 のため停止'))
+            if active:
+                outside.append(destination)
     print('\nMac の外へ送る先: ' + ('、'.join(dict.fromkeys(outside)) or 'なし（音声も文字も Mac の外へ出ません）'))
     if not mica_config.cloud_allowed():
         print('MICA_NO_CLOUD=1 が付いています。この Mac の外の AI へは送りません。')
@@ -161,9 +180,16 @@ def connect(args) -> int:
         answer = ask('番号か名前')
         name = CHOICES[int(answer) - 1][0] if answer.isdigit() and 0 < int(answer) <= len(CHOICES) else answer
     raw = raw_config()
-    before = json.dumps(raw, ensure_ascii=False)
     ai = raw.setdefault('ai', {})
+    if args.key_env and not args.base_url:
+        raise SystemExit('--key-env は --base-url と一緒に指定してください。')
+    if args.transcription_check and name != 'openai':
+        raise SystemExit('--transcription-check は openai の時だけ指定できます。')
     if name == 'claude_cli':
+        if args.advice or args.base_url or args.key_env:
+            raise SystemExit('claude_cli は会議後の分析だけに使えます。')
+        if not mica_config.cloud_allowed():
+            raise SystemExit('MICA_NO_CLOUD=1 のため、Claude Code にはつなぎません。')
         if not shutil.which('claude'):
             raise SystemExit('claude コマンドが見つかりません。Claude Code（https://claude.com/claude-code）を入れてログインしてから、もう一度実行してください。')
         ai['analysis'] = f'claude_cli/{args.model}' if args.model else 'claude_cli'
@@ -175,9 +201,9 @@ def connect(args) -> int:
         if args.key_env:
             entry['api_key_env'] = args.key_env
         ai.setdefault('providers', {})[name] = entry
-        write_config(raw)  # つなぎ先の定義だけを先に書く（これだけでは何も送らない）
+    mica_config.check(raw, mica_config.config_path())
     try:
-        found = mica_llm.provider(name)
+        found = mica_llm.provider(name, ai.get('providers', {}))
     except ValueError as error:
         raise SystemExit(str(error))
     found.update(name=name, key='')
@@ -186,28 +212,34 @@ def connect(args) -> int:
     if found['key_env']:
         store_key(name, found)
         found['key'] = mica_config.stored_key(found['key_env'], f'{name}-api-key')
-    model = choose_model(name, found, args.model)
     roles = [role for role in ROLES if getattr(args, role)]
-    if not roles:
+    check_only = args.transcription_check and not roles
+    model = None if check_only else choose_model(name, found, args.model)
+    if not roles and not check_only:
         answer = ask('何に使いますか  1) 会議中の助言と質問  2) 会議後の分析  3) 両方', '3')
-        roles = {'1': ['advice'], '2': ['analysis']}.get(answer, list(ROLES))
+        if answer not in ('1', '2', '3'):
+            raise SystemExit('1・2・3 のどれかを指定してください。')
+        roles = {'1': ['advice'], '2': ['analysis'], '3': list(ROLES)}[answer]
     for role in roles:
         ai[role] = f'{name}/{model}'
     if name == 'openai' and (args.transcription_check or (not args.model and sys.stdin.isatty() and ask(
             '文字起こしの2重確認もオンにしますか（会議中の音声が OpenAI へ送られます） y/N', 'N').lower().startswith('y'))):
         ai['transcription_check'] = 'openai'
-    write_config(raw)
-    if not args.no_check:
+    mica_config.check(raw, mica_config.config_path())
+    if not args.no_check and roles:
         print(f'{found["label"]} の {model} を1回試します…')
         try:
-            seconds = mica_llm.check(roles[0])
+            seconds = mica_llm.check_connection(dict(found, model=model))
         except RuntimeError as error:
-            write_config(json.loads(before))  # 試して通らなかった設定は残さない
-            raise SystemExit(f'つなげませんでした。設定は元に戻しました。\n{error}')
+            raise SystemExit(f'つなげませんでした。設定は変えていません。\n{error}') from None
         print(f'返事が来ました（{seconds:.1f}秒）。')
+    write_config(raw)
+    if check_only:
+        print('文字起こしの2重確認をつなぎました。音声の送信試験は行っていません。')
+        return status(args)
     where = 'この Mac の中で動くので、Mac の外へは送りません。' if mica_llm.is_local(found) else f'使う時、会議の文字起こしが {found["label"]} へ送られます。'
     print('・'.join(ROLES[role] for role in roles) + f'を {name}/{model} につなぎました。{where}')
-    print('Mica を開いていれば、次の会議から使えます。\n')
+    print('Mica を開いていれば、次の呼び出しから使えます。\n')
     return status(args)
 
 
@@ -248,6 +280,10 @@ def doctor(_args) -> int:
     line(app.is_dir(), 'Mica.app', str(app) if app.is_dir() else './install.sh を実行してください')
     line((support / 'MicaRecorder.app').is_dir(), '録画アプリ MicaRecorder', '' if (support / 'MicaRecorder.app').is_dir() else './install.sh を実行してください')
     line((support / 'asr-runtime' / '.venv').is_dir(), '音声認識の実行環境')
+    here = Path(__file__).resolve().parent / 'service'
+    stale = [path.name for path in sorted(here.glob('*.py')) if not path.name.startswith('test_')
+             and (not (support / 'service' / path.name).is_file() or (support / 'service' / path.name).read_bytes() != path.read_bytes())]
+    line(not stale, '入っているサービス', 'このフォルダの物と同じ' if not stale else f'このフォルダの物と違います（{stale[0]} など {len(stale)} 件）。./install.sh を動かし直してください')
     line(running('shodan_asr_service.py'), '音声認識の常駐', '' if running('shodan_asr_service.py') else f'ログ: {support}/logs/')
     line(running('shodan_watch.py'), '見張り役の常駐', '' if running('shodan_watch.py') else f'ログ: {support}/logs/')
     ffmpeg = mica_config.config()['ffmpeg'] or shutil.which('ffmpeg')
@@ -258,6 +294,9 @@ def doctor(_args) -> int:
         if not spec:
             line(None, title, 'つないでいません（./mica connect）')
         elif role == 'analysis' and mica_config.analysis_engine() == 'claude_cli':
+            if not mica_config.cloud_allowed():
+                line(False, title, 'MICA_NO_CLOUD=1 のため使いません')
+                continue
             found = shutil.which('claude')
             version = subprocess.run([found, '--version'], capture_output=True, text=True).stdout.strip() if found else ''
             line(bool(found), title, f'{spec}（Claude Code {version}。分析そのものは試していません）' if found else 'claude コマンドが見つかりません')
@@ -296,6 +335,8 @@ def main() -> int:
         return args.run(args)
     except ValueError as error:  # 設定の誤り
         raise SystemExit(str(error))
+    except OSError as error:
+        raise SystemExit(f'設定ファイルか必要なコマンドを読み書きできません: {error}') from None
     except (KeyboardInterrupt, EOFError):
         print()
         return 130

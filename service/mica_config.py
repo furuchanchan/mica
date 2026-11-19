@@ -9,7 +9,7 @@ MICA_NO_CLOUD=1 を付けると、設定に書いてあっても、この Mac �
 MICA_APP_SUPPORT（既定 ~/Library/Application Support/Mica）、MICA_LIVE_PORT（既定 18768）、MICA_APP_PORT（既定 18770）。
 """
 from __future__ import annotations
-import copy, json, os, shutil, subprocess
+import copy, json, os, re, shutil, subprocess
 from functools import lru_cache
 from pathlib import Path
 
@@ -23,7 +23,7 @@ DEFAULTS = {
         'drive': {'enabled': False, 'work': {'account': None, 'folder': None},
                   'private': {'account': None, 'folder': None}},
         'slack': {'enabled': False, 'channel': None, 'command': None},   # command: 実行する argv の配列。末尾にチャンネルを足し、標準入力に本文を渡す
-        'knowledge_base': {'enabled': False, 'ingest_command': None, 'search_command': None},  # ingest_command: argv の配列。末尾に分析ページのパスを足す
+        'knowledge_base': {'enabled': False, 'ingest_command': None},  # ingest_command: argv の配列。末尾に分析ページのパスを足す
     },
     'context': {'enabled': False, 'projects_dir': None},   # 過去の会話ログ（Claude Code の projects フォルダ）から会議の背景を探す
     'ai': {
@@ -41,7 +41,8 @@ def _merge(base: dict, over: dict, path: str = '') -> dict:
     result = copy.deepcopy(base)
     for key, value in over.items():
         if key not in base:
-            moved = '（0.12 で ai.analysis に替わりました。README の「設定」を見てください）' if path + key == 'analysis' else ''
+            moved = {'analysis': '（0.12 で ai.analysis に替わりました。README の「設定」を見てください）',
+                     'delivery.knowledge_base.search_command': '（0.12.1 で無くしました。分析の AI は道具を持ちません。この行を消してください）'}.get(path + key, '')
             raise ValueError(f'設定ファイルに知らない項目があります: {path}{key}{moved}')
         if path + key == 'ai.providers':  # 名前は使う人が決めるので、中身は mica_llm が確かめる
             result[key] = value
@@ -65,7 +66,8 @@ def config() -> dict:
     """設定を返す。設定ファイルが書き換わったら読み直す（./mica connect の後に、常駐を起こし直さなくて済むように）。"""
     path = config_path()
     try:
-        stamp = (str(path), path.stat().st_mtime_ns)
+        info = path.stat()
+        stamp = (str(path), info.st_mtime_ns, info.st_ctime_ns, info.st_size, info.st_ino)
     except FileNotFoundError:
         stamp = (str(path), 0)
     if _loaded['stamp'] != stamp:
@@ -89,6 +91,8 @@ def _read(path: Path) -> dict:
 
 def check(loaded: dict, path: Path) -> dict:
     """書いた項目を既定に重ね、確かめて返す。誤りは、原因が分かる文で失敗する。"""
+    if not isinstance(loaded, dict):
+        raise ValueError(f'設定ファイル {path} の最上位は {{...}} の形で書いてください')
     value = _merge(DEFAULTS, loaded)
     _validate(value, path)
     return value
@@ -99,28 +103,79 @@ def reload() -> None:
 
 
 def _validate(value: dict, path: Path) -> None:
+    def typed(item, expected, name, nullable=False):
+        if nullable and item is None:
+            return
+        if type(item) is not expected:
+            raise ValueError(f'設定 {name} の型が正しくありません: {path}')
+
+    def text(item, name, nullable=False):
+        typed(item, str, name, nullable)
+        if item is not None and (not item.strip() or any(ord(char) < 32 for char in item)):
+            raise ValueError(f'設定 {name} は空でない文字列で書いてください: {path}')
+
+    def strings(item, name, nullable=False):
+        typed(item, list, name, nullable)
+        if item is not None:
+            if not item:
+                raise ValueError(f'設定 {name} は空でない配列で書いてください: {path}')
+            for entry in item:
+                text(entry, name)
+
+    for name in ('data_root', 'user_name', 'google_credentials_dir'):
+        text(value[name], name)
+    for name in ('ffmpeg', 'negotiation_notes'):
+        text(value[name], name, True)
+    typed(value['ignore_mic_apps'], list, 'ignore_mic_apps')
+    for item in value['ignore_mic_apps']:
+        text(item, 'ignore_mic_apps')
+    calendar = value['calendar']
+    typed(calendar['enabled'], bool, 'calendar.enabled')
+    for name in ('account', 'personal_calendar'):
+        text(calendar[name], 'calendar.' + name, True)
+    strings(calendar['calendars'], 'calendar.calendars')
+    typed(value['context']['enabled'], bool, 'context.enabled')
+    text(value['context']['projects_dir'], 'context.projects_dir', True)
+    delivery = value['delivery']
+    for name in ('drive', 'slack', 'knowledge_base'):
+        typed(delivery[name]['enabled'], bool, 'delivery.' + name + '.enabled')
+    for side in ('work', 'private'):
+        for name in ('account', 'folder'):
+            text(delivery['drive'][side][name], 'delivery.drive.' + side + '.' + name, True)
+    text(delivery['slack']['channel'], 'delivery.slack.channel', True)
+    strings(delivery['slack']['command'], 'delivery.slack.command', True)
+    strings(delivery['knowledge_base']['ingest_command'], 'delivery.knowledge_base.ingest_command', True)
     ai = value['ai']
     for role in ('advice', 'analysis'):
         spec = ai[role]
-        if spec is not None and (not isinstance(spec, str) or not spec.strip()):
-            raise ValueError(f'設定 ai.{role} は "会社/モデル" の文字列か null です（{spec!r}）: {path}')
-    if ai['advice'] and '/' not in ai['advice']:
-        raise ValueError(f'設定 ai.advice は "会社/モデル" の形で書いてください（例 openai/gpt-6-luna。{ai["advice"]!r}）: {path}')
-    if ai['analysis'] and '/' not in ai['analysis'] and ai['analysis'] != 'claude_cli':
-        raise ValueError(f'設定 ai.analysis は claude_cli か "会社/モデル" です（{ai["analysis"]!r}）: {path}')
+        text(spec, 'ai.' + role, True)
+        if spec is None:
+            continue
+        name, separator, model = spec.partition('/')
+        if name == 'claude_cli' and role != 'analysis':
+            raise ValueError(f'設定 claude_cli は ai.analysis だけで使えます: {path}')
+        if (not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', name)
+                or (not separator and spec != 'claude_cli') or (separator and not model.strip())):
+            raise ValueError(f'設定 ai.{role} は "名前/モデル" の形で書いてください（例 openai/gpt-6-luna、ollama/gemma3:4b）: {path}')
     if ai['transcription_check'] not in (None, 'openai'):
-        raise ValueError(f'設定 ai.transcription_check は "openai" か null です（{ai["transcription_check"]!r}）: {path}')
+        raise ValueError(f'設定 ai.transcription_check は "openai" か null です: {path}')
     if not isinstance(ai['providers'], dict):
         raise ValueError(f'設定 ai.providers は {{...}} の形で書いてください: {path}')
+    for name, provider in ai['providers'].items():
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', name) or name == 'claude_cli':
+            raise ValueError(f'設定 ai.providers の会社名が正しくありません: {path}')
+        if not isinstance(provider, dict) or set(provider) - {'base_url', 'api_key_env'}:
+            raise ValueError(f'設定 ai.providers の項目の形が正しくありません: {path}')
+        text(provider.get('base_url'), 'ai.providers.base_url')
+        key_env = provider.get('api_key_env')
+        if key_env is not None and (not isinstance(key_env, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key_env)):
+            raise ValueError(f'設定 ai.providers.api_key_env は環境変数名で書いてください: {path}')
     delivery = value['delivery']
     enabled = [name for name in ('drive', 'slack', 'knowledge_base') if delivery[name]['enabled']]
     if enabled and not ai['analysis']:
         raise ValueError(f'設定 delivery.{enabled[0]} は分析の結果を届ける機能です。ai.analysis を書いてください: {path}')
     if value['negotiation_notes'] and not ai['analysis']:
         raise ValueError(f'設定 negotiation_notes は分析で使います。ai.analysis を書いてください: {path}')
-    search = delivery['knowledge_base']['enabled'] and delivery['knowledge_base']['search_command']
-    if search and not (ai['analysis'] or '').startswith('claude_cli'):
-        raise ValueError(f'設定 delivery.knowledge_base.search_command は、ai.analysis が claude_cli の時だけ使えます: {path}')
 
 
 def _need(value, name: str):
@@ -138,8 +193,11 @@ def _port(name: str, default: int) -> int:
     if not value:
         return default
     if not value.isdigit():
-        raise ValueError(f'環境変数 {name} はポート番号で書いてください（{value!r}）')
-    return int(value)
+        raise ValueError(f'環境変数 {name} はポート番号で書いてください')
+    port = int(value)
+    if not 1 <= port <= 65535:
+        raise ValueError(f'環境変数 {name} は 1〜65535 のポート番号で書いてください')
+    return port
 
 
 def live_port() -> int:
@@ -225,11 +283,6 @@ def knowledge_base_ingest() -> list[str]:
     return list(_need(config()['delivery']['knowledge_base']['ingest_command'], 'delivery.knowledge_base.ingest_command'))
 
 
-def knowledge_base_search() -> str | None:
-    """分析のモデルに「過去の文脈はこれで引く」と伝えるコマンドの例。無ければ None。"""
-    return config()['delivery']['knowledge_base']['search_command']
-
-
 def context_enabled() -> bool:
     return bool(config()['context']['enabled'])
 
@@ -268,7 +321,7 @@ def next_technique_path() -> Path:
 
 
 def cloud_allowed() -> bool:
-    return os.environ.get('MICA_NO_CLOUD', '').strip() not in ('1', 'true', 'yes')
+    return os.environ.get('MICA_NO_CLOUD', '').strip().lower() not in ('1', 'true', 'yes')
 
 
 @lru_cache(maxsize=None)
@@ -289,6 +342,8 @@ def stored_key(env_name: str, keychain_service: str) -> str:
 
 def transcription_check_key() -> str:
     """会議中の音声を OpenAI でも文字に起こす時の鍵。設定 ai.transcription_check が openai で、鍵がある時だけ返す。"""
-    if config()['ai']['transcription_check'] != 'openai' or not cloud_allowed():
+    import mica_llm
+    try:
+        return mica_llm.transcription_connection()['key']
+    except (mica_llm.NotConnected, ValueError):
         return ''
-    return stored_key('OPENAI_API_KEY', 'openai-api-key')

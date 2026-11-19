@@ -17,6 +17,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 import mica_config
+import mica_http
 from shodan_calendar import JST, _token, eligible, epoch, event_key, in_person
 
 PREPARED = mica_config.data_root() / '.next-meeting/meeting-brief.json'
@@ -53,7 +54,7 @@ def fetch():
              'singleEvents': 'true', 'maxResults': '50', 'orderBy': 'startTime'}
         url = f'https://www.googleapis.com/calendar/v3/calendars/{urllib.parse.quote(cal, safe="")}/events?' + urllib.parse.urlencode(q)
         try:
-            with urllib.request.urlopen(urllib.request.Request(url, headers={'Authorization': 'Bearer ' + token}), timeout=15) as r:
+            with mica_http.urlopen(urllib.request.Request(url, headers={'Authorization': 'Bearer ' + token}), timeout=15) as r:
                 items = json.load(r).get('items', [])
         except OSError as exc:
             log(f'カレンダー取得失敗 {cal[:6]}… {exc}')
@@ -125,8 +126,8 @@ def notify(ev):
 
 
 def main():
-    if not mica_config.calendar_enabled():
-        raise SystemExit('設定 calendar.enabled が false です。会議の通知は予定表を読むため、何もしません')
+    if not mica_config.calendar_enabled() or not mica_config.cloud_allowed():
+        raise SystemExit('カレンダーへの通信はオフです。calendar.enabled と MICA_NO_CLOUD の設定を確かめてください')
     STATE.parent.mkdir(parents=True, exist_ok=True)
     done = json.loads(STATE.read_text()) if STATE.exists() else {}
     events, fetched = [], 0.0
