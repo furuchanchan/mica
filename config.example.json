@@ -1,0 +1,7 @@
+{
+  "data_root": "~/Movies/Mica",
+  "user_name": "自分",
+  "ignore_mic_apps": ["com.example.dictation"],
+  "analysis": {"engine": "claude_cli", "model": null},
+  "calendar": {"enabled": false, "account": null, "calendars": ["primary"], "personal_calendar": null}
+}

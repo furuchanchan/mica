@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="ja">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>会議ライブ支援</title>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans",sans-serif;color:#182234;background:#f3f5f8;font-size:14px}*{box-sizing:border-box}body{margin:0;padding:24px;max-width:1500px;margin-inline:auto}header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px}h1{font-size:23px;margin:0 0 5px}h2{font-size:16px;margin:0}p{margin:6px 0;line-height:1.6}.muted{color:#657083;font-size:12px}.layout{display:grid;grid-template-columns:minmax(420px,1fr) 340px;gap:16px}.panel{background:#fff;border:1px solid #dde2e9;border-radius:12px;padding:18px}.heading,.actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.heading{justify-content:space-between;margin-bottom:12px}.status{border:1px solid #d8dee7;border-radius:20px;padding:6px 12px;background:#fff;font-size:12px}label{display:block;font-weight:600;margin:16px 0 7px}input,textarea,button{font:inherit}input,textarea{width:100%;border:1px solid #c9d1dc;border-radius:7px;padding:9px;background:#fff;color:inherit}textarea{resize:vertical;min-height:78px}button{border:1px solid #cbd3de;border-radius:7px;padding:8px 11px;background:#fff;color:#24344c;cursor:pointer}button:hover{background:#f1f4f8}button.primary{background:#254f9d;color:white;border-color:#254f9d}button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px solid #b3cdf7;outline-offset:2px}.timers{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:18px}.timer{background:#f4f6f9;border-radius:8px;padding:12px}.timer strong{display:block;font-size:24px;font-variant-numeric:tabular-nums;margin-top:3px}.transcript{height:calc(100vh - 250px);min-height:300px;overflow:auto;overscroll-behavior:contain;padding-right:5px}.who{font-weight:700;color:#30415c}.words{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8;margin-top:5px}.empty{padding:65px 15px;text-align:center;color:#657083}.notice{background:#eef2f8;border-radius:7px;padding:10px;font-size:12px;margin-top:14px;line-height:1.6}.error{background:#fff0ef;color:#9f251d;border:1px solid #f2cdc8;border-radius:7px;padding:10px;margin-bottom:14px}.copy-result{margin-top:10px;font-size:12px;min-height:18px}#fallback{margin-top:12px}#fallback textarea{height:180px}footer{margin-top:12px}.over{color:#af342c}[hidden]{display:none!important}@media(max-width:850px){body{padding:14px}.layout{grid-template-columns:1fr}.transcript{height:50vh;min-height:240px}aside{grid-row:1}header{align-items:flex-start}}
+.status.recording::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 5px; border-radius: 50%; background: #248245 }
+.segment { padding: 4px 0 5px }
+.segment .meta { display: flex; gap: 6px; align-items: center; font-size: 11px; color: #657083 }
+.segment .words { margin-top: 2px; line-height: 1.55 }
+.segment.draft .words { color: #46556d }
+.segment .review {
+    display: inline-grid; place-items: center; width: 18px; height: 16px;
+    padding: 0; border: 0; color: #925008; background: transparent;
+}
+.segment .review span {
+    display: inline-grid; place-items: center; width: 13px; height: 13px;
+    border: 1px solid currentColor; border-radius: 50%; font: 600 10px/1 sans-serif;
+}
+.segment .notes { margin: 5px 0 1px; padding: 6px 8px; list-style: none; background: #f3f5f8; border-radius: 5px; font-size: 12px }
+.segment .notes li { display: flex; gap: 8px; padding: 2px 0; overflow-wrap: anywhere }
+.segment .notes time { color: #657083; font-variant-numeric: tabular-nums }
+</style>
+<header><div><h1 id="title">会議ライブ支援</h1><p class="muted">録音を続けながら、発言と残り時間を確認（5秒ごとの音声＋認識処理の遅れがあります）</p></div><span class="status" id="status" role="status">接続中</span></header>
+<div id="error" class="error" role="alert" hidden></div>
+<main class="layout">
+<section class="panel"><div class="heading"><h2>文字起こし</h2><label style="margin:0;font-size:12px;font-weight:400"><input id="follow" type="checkbox" checked style="width:auto"> 最新に追従</label></div><div id="transcript" class="transcript" tabindex="0" aria-label="会議の文字起こし"><p class="empty">発言が届くと、ここに表示されます。</p></div><footer class="muted" id="updated">最終更新：未取得</footer></section>
+<aside class="panel"><h2>会議の進行</h2><label for="purpose">この会議で決めたいこと</label><textarea id="purpose" placeholder="例：導入する範囲と次回までの担当を決める"></textarea><div id="todosBox" hidden><label>やること（会議前に自動で準備）</label><ul id="todos" style="margin:4px 0 10px;padding-left:20px"></ul></div><label for="endtime">終了予定時刻</label><input id="endtime" type="time"><div class="timers"><div class="timer"><span class="muted">経過</span><strong id="elapsed">—</strong></div><div class="timer"><span class="muted">残り</span><strong id="remaining">未設定</strong></div></div><p class="muted">録音中の経過は、受信した音声の長さです。</p><label for="question">相談したいこと</label><textarea id="question" placeholder="例：相手の懸念を確かめるには何を聞く？"></textarea><div class="actions" style="margin-top:14px"><button id="copyRecent" type="button">直近3分をコピー</button><button id="copyAll" type="button">全体をコピー</button><button id="copyPrompt" class="primary" type="button">AI相談文をコピー</button></div><p id="copyResult" class="copy-result" role="status" aria-live="polite"></p><div id="fallback" hidden><label for="copyText">コピーできませんでした。下の文を選択してコピーしてください。</label><textarea id="copyText" readonly></textarea></div><button id="askAI" class="primary" type="button">今、何を確認すべき？</button><label style="font-size:12px"><input id="autoAdvice" type="checkbox" style="width:auto"> 新しい発言があれば30秒ごとに助言を更新</label><p id="aiStatus" class="muted" role="status">OpenAIの既存API接続を使用します。</p><p id="adviceNotice" class="muted"></p><div id="advice" class="words" aria-live="polite"></div><p id="autoStatus" class="muted" role="status"></p><p id="autoNotice" class="muted"></p><div id="autoAnswer" class="words" aria-live="polite"></div><p class="notice">AIへ相談すると、目的・質問・残り時間・質問時点の発言をOpenAIへ送ります。文字起こし用の音声もOpenAIへ送信します。助言は会議の確定事項ではありません。</p></aside>
+</main>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+let segments=[];
+let aiBrief=null;
+let sessionId=null, aiBusy=false, submitting=false, lastAdvised='', lastAdviceTime=0;
+let lastSignature='', openReview=null;
+let targetEnd=null, questionError=null;
+const statusNames={recording:'録音状態未確認','録音中':'録音状態未確認',transcribing:'文字起こし中',idle:'待機中',stopped:'停止済み',completed:'完了',error:'エラー',starting:'開始中'};
+function clock(seconds){const s=Math.max(0,Math.floor(seconds));return Math.floor(s/60).toString().padStart(2,'0')+':'+(s%60).toString().padStart(2,'0');}
+function who(value){return ({self:'自分',me:'自分',mic:'自分',microphone:'自分',local:'自分','自分':'自分',other:'相手',remote:'相手',system:'相手','相手':'相手'})[value]||String(value||'話者未確認');}
+function normalized(items){return items.map((s,i)=>({id:String(s.id??i),start:Number(s.start)||0,end:Number(s.end)||Number(s.start)||0,who:who(s.who)+(s.speaker_status==='tentative'?'（仮）':''),text:String(s.text??''),aiText:String(s.ai_text??'［聞き取り未確認］'),note:String(s.verification_note??'')}));}
+function transcriptText(items){return items.map(s=>'['+clock(s.start)+'] '+s.who+'：'+s.text+(s.note?'\n※要確認: '+s.note:'')).join('\n');}
+function render(turns) {
+    const signature = JSON.stringify([sessionId, turns]);
+    if (signature === lastSignature) return;
+    lastSignature = signature;
+    if (openReview && !turns.some(turn => turn.id === openReview && turn.notes.length)) openReview = null;
+    const area = $('transcript');
+    const prior = area.scrollTop;
+    const focusedReview = area.contains(document.activeElement) ? document.activeElement.dataset.review : null;
+    const fragment = document.createDocumentFragment();
+    let reviewToFocus;
+    if (!turns.length) {
+        const empty = document.createElement('p');
+        empty.className = 'empty';
+        empty.textContent = '発言が届くと、ここに表示されます。';
+        fragment.append(empty);
+    }
+    for (const turn of turns) {
+        const article = document.createElement('article');
+        article.className = turn.draft ? 'segment draft' : 'segment';
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        const speaker = document.createElement('span');
+        speaker.className = 'who';
+        speaker.textContent = turn.who;
+        const time = document.createElement('span');
+        time.textContent = clock(turn.start);
+        meta.append(speaker, time);
+        if (turn.draft) {
+            const badge = document.createElement('span');
+            badge.textContent = '速報';
+            meta.append(badge);
+        }
+        const words = document.createElement('div');
+        words.className = 'words';
+        words.textContent = turn.text;
+        article.append(meta, words);
+
+        if (turn.notes.length) {
+            const review = document.createElement('button');
+            review.type = 'button';
+            review.className = 'review';
+            review.title = '聞き取りを確認';
+            review.dataset.review = turn.id;
+            review.setAttribute('aria-label', review.title);
+            const icon = document.createElement('span');
+            icon.setAttribute('aria-hidden', 'true');
+            icon.textContent = '!';
+            review.append(icon);
+            const notes = document.createElement('ul');
+            notes.className = 'notes';
+            notes.id = 'review-' + turn.id;
+            notes.hidden = openReview !== turn.id;
+            review.setAttribute('aria-controls', notes.id);
+            review.setAttribute('aria-expanded', String(!notes.hidden));
+            for (const note of turn.notes) {
+                const item = document.createElement('li');
+                const stamp = document.createElement('time');
+                stamp.textContent = clock(note.start);
+                const content = document.createElement('span');
+                content.textContent = note.text;
+                item.append(stamp, content);
+                notes.append(item);
+            }
+            review.addEventListener('click', () => {
+                const previous = openReview && document.getElementById('review-' + openReview);
+                if (previous) {
+                    previous.hidden = true;
+                    previous.closest('.segment').querySelector('.review').setAttribute('aria-expanded', 'false');
+                }
+                openReview = openReview === turn.id ? null : turn.id;
+                notes.hidden = openReview !== turn.id;
+                review.setAttribute('aria-expanded', String(!notes.hidden));
+                if (!notes.hidden) notes.scrollIntoView({block: 'nearest'});
+            });
+            if (focusedReview === turn.id) reviewToFocus = review;
+            meta.append(review);
+            article.append(notes);
+        }
+        fragment.append(article);
+    }
+    area.replaceChildren(fragment);
+    if (reviewToFocus) reviewToFocus.focus({preventScroll: true});
+    area.scrollTop = $('follow').checked && !openReview ? area.scrollHeight : prior;
+}
+function showError(message){$('error').hidden=!message;$('error').textContent=message;}
+function renderCapture(state) {
+    const recording = state.capture_active === true;
+    const badge = $('status');
+    badge.classList.toggle('recording', recording);
+    badge.textContent = recording
+        ? (state.recovery_message || state.status === '復旧待ち' ? '録音中・復旧待ち' : '録音中')
+        : (statusNames[state.status] || String(state.status || '待機中'));
+    const elapsed = state.capture_elapsed_seconds ?? segments.at(-1)?.end;
+    $('elapsed').textContent = Number.isFinite(elapsed) ? clock(elapsed) : '—';
+    showError(state.error || state.capture_warning || state.recovery_message || '');
+}
+async function poll() {
+    try {
+        const response = await fetch('/api/state', {cache: 'no-store', signal: AbortSignal.timeout(8000)});
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const state = await response.json();
+        aiBrief = state.ai_brief ?? null;
+        { const items = Array.isArray(state.brief?.todos) ? state.brief.todos : []; const key = items.join('\n'); if ($('todos').dataset.key !== key) { $('todos').dataset.key = key; $('todos').replaceChildren(...items.map(t => { const li = document.createElement('li'); li.textContent = t; return li; })); $('todosBox').hidden = !items.length; } }
+        if (!Array.isArray(state.segments) || !Array.isArray(state.transcript_turns)) throw new Error('文字起こしデータの形式が正しくありません');
+        segments = normalized(state.segments);
+        if (sessionId !== state.session_id) {
+            openReview = null;
+            $('purpose').value = state.brief?.purpose || '';
+            $('question').value = '';
+            targetEnd = state.brief?.ends_at ? state.brief.ends_at * 1000 : null;
+            $('autoAdvice').checked = state.brief?.automatic ?? false;
+            questionError = null;
+            lastAdvised = '';
+            sessionId = state.session_id;
+            tick();
+        }
+        $('advice').textContent = state.advice?.text || '';
+        $('adviceNotice').textContent = state.advice?.source_notice || '';
+        $('autoAnswer').textContent = state.manual_advice ? state.auto_advice?.text || '' : '';
+        $('autoNotice').textContent = state.manual_advice ? state.auto_advice?.source_notice || '' : '';
+        const autoError = state.auto_ai_status?.error;
+        $('autoStatus').textContent = autoError ? '自動ヒント: ' + autoError
+            : (state.auto_ai_status?.phase === 'running' ? '自動ヒントを作成中・質問できます' : state.manual_advice && state.auto_advice ? '自動ヒント' : '');
+        aiBusy = submitting || state.ai_status?.phase === 'running';
+        $('askAI').disabled = aiBusy;
+        const manualError = questionError || (!aiBusy && state.ai_status?.error);
+        $('aiStatus').textContent = manualError ? '今回の質問: ' + manualError
+            : (aiBusy ? '会話を読み解いています。文字起こしは続いています。' : '目的と相談はこの会議に保存されます。');
+        $('title').textContent = state.title || '会議ライブ支援';
+        renderCapture(state);
+        const stamp = new Date(typeof state.updated_at === 'number' ? state.updated_at * 1000 : state.updated_at);
+        $('updated').textContent = '最終更新：' + (Number.isNaN(stamp.getTime()) ? '取得済み' : stamp.toLocaleTimeString('ja-JP'));
+        render(state.transcript_turns);
+    } catch (error) {
+        $('status').classList.remove('recording');
+        $('status').textContent = '接続エラー';
+        showError('会議データを取得できません：' + error.message + '。2秒後に再接続します。');
+    } finally {
+        setTimeout(poll, 2000);
+    }
+}
+function tick(){const now=Date.now();const remaining=$('remaining');if(targetEnd===null){remaining.textContent='未設定';remaining.classList.remove('over');return;}const seconds=(targetEnd-now)/1000;remaining.textContent=seconds>=0?clock(seconds):clock(-seconds)+'超過';remaining.classList.toggle('over',seconds<0);}
+$('endtime').addEventListener('change',()=>{if(!$('endtime').value){targetEnd=null;tick();return;}const [hour,minute]=$('endtime').value.split(':').map(Number);const date=new Date();date.setHours(hour,minute,0,0);targetEnd=date.getTime();tick();});
+async function copy(text){if(!text.trim()){$('copyResult').textContent='コピーする文字起こしがまだありません。';return;}$('fallback').hidden=true;try{if(!navigator.clipboard)throw new Error('clipboard unavailable');await navigator.clipboard.writeText(text);$('copyResult').textContent='コピーしました。';}catch{$('copyResult').textContent='自動コピーに失敗しました。';$('fallback').hidden=false;$('copyText').value=text;$('copyText').focus();$('copyText').select();}}
+$('copyRecent').addEventListener('click',()=>{const latest=Math.max(0,...segments.map(s=>s.end));copy(transcriptText(segments.filter(s=>s.end>=latest-180)));});
+$('copyAll').addEventListener('click',()=>copy(transcriptText(segments)));
+$('copyPrompt').addEventListener('click',()=>{if(!aiBrief){$('copyResult').textContent='AI用の確認済み情報を取得中です';return;}const timing=targetEnd===null?'未設定':$('remaining').textContent;copy('会議中の進行について相談します。\n\n【会議の目的】\n'+(aiBrief.purpose||'未入力')+'\n\n【残り時間】\n'+timing+'\n\n【質問】\n'+($('question').value.trim()||'今、何を確認してどう進めるべきですか？')+'\n\n【文字起こし】\n'+(segments.map(s=>'['+clock(s.start)+'] '+s.who+': '+s.aiText).join('\n')||'まだありません')+'\n\n上の発言に基づき、次の確認質問、次の一手、残り時間の配分を簡潔に提案してください。事実と推測を分け、発言にない合意や条件を作らないでください。');});
+$('follow').addEventListener('change',()=>{if($('follow').checked)$('transcript').scrollTop=$('transcript').scrollHeight;});
+async function askAI(){
+ if(aiBusy)return;
+ if(!segments.length){$('aiStatus').textContent='文字起こしを受信してから相談できます。';return;}
+ const requestedSession=sessionId;
+ const signature=JSON.stringify(segments);
+ aiBusy=true;submitting=true;questionError=null;$('askAI').disabled=true;$('aiStatus').textContent='発言を読んでいます…';
+ try{
+  await saveBrief();
+  const r=await fetch('/api/advice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:sessionId,purpose:$('purpose').value,question:$('question').value,remaining:$('remaining').textContent}),signal:AbortSignal.timeout(40000)});
+  const result=await r.json();if(!r.ok)throw new Error(result.error||'AI接続エラー');
+  if(requestedSession!==sessionId)throw new Error('会議が切り替わったため、前の会議の回答は表示しません。');
+  $('aiStatus').textContent='AIが回答を作成しています。';lastAdvised=signature;lastAdviceTime=Date.now();
+ }catch(error){
+  if(requestedSession===sessionId){questionError=error.message;$('aiStatus').textContent='今回の質問: '+questionError;}
+  aiBusy=false;
+ }
+ finally{submitting=false;$('askAI').disabled=aiBusy;}
+}
+$('askAI').addEventListener('click',askAI);
+async function saveBrief(){if(!sessionId)return;try{const r=await fetch('/api/brief',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:sessionId,purpose:$('purpose').value,ends_at:targetEnd?targetEnd/1000:null,automatic:$('autoAdvice').checked})});if(!r.ok)throw new Error();}catch{$('aiStatus').textContent='会議の目的を保存できませんでした。';}}
+let briefTimer;['purpose','endtime','autoAdvice'].forEach(id=>$(id).addEventListener('input',()=>{clearTimeout(briefTimer);briefTimer=setTimeout(saveBrief,500);}));
+tick();setInterval(tick,1000);poll();
+</script>
+</html>

@@ -1,0 +1,7 @@
+__pycache__/
+*.log
+.DS_Store
+build.json
+qa-build.json
+build.log
+.yomiyasu/
